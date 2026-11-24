@@ -86,6 +86,21 @@ def list_drives(
         d_dict["days_remaining"] = max(0, int(time_rem / 86400))
         d_dict["hours_remaining"] = max(0, int(time_rem / 3600))
         
+        # Dynamic Freshness Detection (48 hours window)
+        if d.created_at:
+            created_dt = d.created_at if d.created_at.tzinfo else d.created_at.replace(tzinfo=timezone.utc)
+            hours_since_created = max(0, (now - created_dt).total_seconds() / 3600)
+            d_dict["is_new"] = hours_since_created <= 48
+            if hours_since_created < 1:
+                d_dict["posted_time_ago"] = "Just now"
+            elif hours_since_created < 24:
+                d_dict["posted_time_ago"] = f"{int(hours_since_created)}h ago"
+            else:
+                d_dict["posted_time_ago"] = f"{int(hours_since_created // 24)}d ago"
+        else:
+            d_dict["is_new"] = False
+            d_dict["posted_time_ago"] = None
+        
         app_info = applied_map.get(d.id, {})
         d_dict["has_applied"] = app_info.get("has_applied", False)
         d_dict["application_status"] = app_info.get("status", None)

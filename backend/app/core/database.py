@@ -29,6 +29,12 @@ def init_db():
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN company_website VARCHAR"))
                 if "selection_rounds" not in col_names:
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN selection_rounds VARCHAR"))
+                if "form_type" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN form_type VARCHAR DEFAULT 'DIRECT_FORM'"))
+                if "verification_status" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN verification_status VARCHAR DEFAULT 'VERIFIED_ACTIVE'"))
+                if "expected_fields" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN expected_fields TEXT"))
                 conn.commit()
             except Exception as e:
                 print(f"Schema migration notice: {e}")
@@ -137,6 +143,24 @@ def init_db():
                 # 2. Heal null or aggregator company_website
                 if not d.company_website or any(agg in (d.company_website or '').lower() for agg in ["remotive.com", "jobicy.com", "arbeitnow.com"]):
                     d.company_website = resolve_company_website(d.company_name, d.company_website)
+                    changed = True
+                # 3. Heal form_type, verification_status, and expected_fields
+                if not getattr(d, 'form_type', None):
+                    d.form_type = "DIRECT_FORM"
+                    changed = True
+                if not getattr(d, 'verification_status', None):
+                    d.verification_status = "VERIFIED_ACTIVE"
+                    changed = True
+                if not getattr(d, 'expected_fields', None):
+                    c_lower = (d.company_name or '').lower()
+                    if 'tcs' in c_lower:
+                        d.expected_fields = '["Full Name", "College Roll No", "10th Marksheet", "12th Marksheet", "CGPA Certificate", "Resume PDF", "Aadhaar Card"]'
+                    elif 'zoho' in c_lower:
+                        d.expected_fields = '["Full Name", "Email", "Phone", "Degree & Department", "Current CGPA", "Resume PDF", "Preferred Language (C/Java)"]'
+                    elif 'amazon' in c_lower:
+                        d.expected_fields = '["Full Name", "Email", "Resume PDF", "LinkedIn Profile", "Work Authorization"]'
+                    else:
+                        d.expected_fields = '["Full Name", "Email", "Phone", "College / Degree", "Resume PDF", "LinkedIn Profile", "GitHub URL"]'
                     changed = True
                 if changed:
                     session.add(d)

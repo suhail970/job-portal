@@ -84,6 +84,9 @@ class PlacementDrive(SQLModel, table=True):
     application_url: Optional[str] = Field(default=None) # Direct external/company portal link
     company_website: Optional[str] = Field(default=None) # Official company website
     selection_rounds: Optional[str] = Field(default=None) # e.g. "Online Assessment -> Tech Interview -> HR"
+    form_type: Optional[str] = Field(default="DIRECT_FORM") # "DIRECT_FORM" | "CORPORATE_PORTAL" | "CAMPUS_DRIVE"
+    verification_status: Optional[str] = Field(default="VERIFIED_ACTIVE") # "VERIFIED_ACTIVE" | "PENDING_VERIFICATION"
+    expected_fields: Optional[str] = Field(default=None) # JSON list or description of required fields
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # -------------------------------------------------------------
