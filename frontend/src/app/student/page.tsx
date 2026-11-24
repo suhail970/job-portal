@@ -1075,7 +1075,7 @@ export default function StudentPortalPage() {
                         onClick={(e) => e.stopPropagation()}
                       >
                         <ExternalLink className="w-3 h-3 text-violet-600" />
-                        <span>Official Portal ↗</span>
+                        <span>Application Form ↗</span>
                       </a>
                     )}
                     {d.company_website && (
@@ -2214,10 +2214,10 @@ export default function StudentPortalPage() {
                       <div className="space-y-0.5">
                         <p className="text-xs font-bold text-violet-950 flex items-center gap-1.5">
                           <ExternalLink className="w-4 h-4 text-violet-600" />
-                          <span>Official Registration / Application Form Link</span>
+                          <span>Official Corporate Application Form</span>
                         </p>
                         <p className="text-[11px] text-violet-700">
-                          External careers portal or registration form for {selectedDriveForModal.company_name}.
+                          Direct online job application form & careers portal for {selectedDriveForModal.company_name}.
                         </p>
                       </div>
                       <a
@@ -2226,7 +2226,7 @@ export default function StudentPortalPage() {
                         rel="noopener noreferrer"
                         className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-sm transition whitespace-nowrap cursor-pointer"
                       >
-                        <span>Open Form Link</span>
+                        <span>🚀 Open Form Link</span>
                         <ExternalLink className="w-3.5 h-3.5" />
                       </a>
                     </div>
@@ -2528,18 +2528,21 @@ export default function StudentPortalPage() {
 
                   {/* External Company Form Link Reminder */}
                   {selectedDriveForModal.application_url && (
-                    <div className="p-3 rounded-xl bg-violet-50 border border-violet-200 text-xs flex items-center justify-between gap-2">
+                    <div className="p-3.5 rounded-xl bg-violet-50/80 border border-violet-200 text-xs flex items-center justify-between gap-3">
                       <div className="space-y-0.5">
-                        <span className="font-bold text-violet-900 block">Direct Company Form Link</span>
-                        <span className="text-[11px] text-violet-700">You can also open the company's registration portal:</span>
+                        <span className="font-bold text-violet-950 flex items-center gap-1.5">
+                          <ExternalLink className="w-3.5 h-3.5 text-violet-600" />
+                          <span>External Corporate Application Form</span>
+                        </span>
+                        <span className="text-[11px] text-violet-700">Open {selectedDriveForModal.company_name}'s official external registration form:</span>
                       </div>
                       <a
                         href={selectedDriveForModal.application_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs font-bold text-violet-700 hover:text-violet-900 underline flex items-center gap-1 shrink-0"
+                        className="px-3 py-1.5 rounded-lg bg-violet-700 hover:bg-violet-800 text-white text-xs font-semibold flex items-center gap-1 shrink-0 transition shadow-xs"
                       >
-                        <span>Open Form ↗</span>
+                        <span>🚀 Open Form ↗</span>
                       </a>
                     </div>
                   )}

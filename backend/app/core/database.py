@@ -118,6 +118,34 @@ def init_db():
         except Exception as e:
             print(f"Notice during drive description sanitization: {e}")
 
+        # Auto-heal missing or generic application URLs and company websites
+        try:
+            from app.workers.job_fetcher import resolve_direct_application_url, resolve_company_website
+            all_drives = session.exec(select(PlacementDrive)).all()
+            healed_any = False
+            for d in all_drives:
+                changed = False
+                # 1. Heal null or generic application_url
+                if not d.application_url or d.application_url.rstrip('/') in [
+                    "https://www.linkedin.com", "https://linkedin.com",
+                    "https://remotive.com", "https://www.remotive.com",
+                    "https://jobicy.com", "https://www.jobicy.com",
+                    "https://arbeitnow.com", "https://www.arbeitnow.com"
+                ]:
+                    d.application_url = resolve_direct_application_url(d.company_name, d.role_title, d.application_url)
+                    changed = True
+                # 2. Heal null or aggregator company_website
+                if not d.company_website or any(agg in (d.company_website or '').lower() for agg in ["remotive.com", "jobicy.com", "arbeitnow.com"]):
+                    d.company_website = resolve_company_website(d.company_name, d.company_website)
+                    changed = True
+                if changed:
+                    session.add(d)
+                    healed_any = True
+            if healed_any:
+                session.commit()
+        except Exception as e:
+            print(f"Notice during drive URL healing: {e}")
+
         # Check if already seeded
         existing_admin = session.exec(select(User).where(User.email == "admin@skillbridge.ai")).first()
         if existing_admin:

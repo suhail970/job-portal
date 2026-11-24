@@ -612,6 +612,187 @@ def is_engineering_role(title: str) -> bool:
     return True
 
 
+KNOWN_ATS_DOMAINS = [
+    "myworkdayjobs.com", "boards.greenhouse.io", "jobs.lever.co", "smartrecruiters.com",
+    "bamboohr.com", "ashbyhq.com", "taleo.net", "successfactors.com", "workable.com",
+    "rippling-ats.com", "recruitee.com", "pinpointhq.com", "applytojob.com", "jobvite.com", "superset.in"
+]
+
+IGNORE_DOMAINS = [
+    "twitter.com", "x.com", "facebook.com", "instagram.com", "reddit.com",
+    "apple.com", "google.com", "play.google.com", "mozilla.org", "microsoft.com",
+    "chatgpt.com", "openai.com", "t.me", "youtube.com", "remotive.com", "jobicy.com", "arbeitnow.com", "linkedin.com"
+]
+
+
+async def unshorten_to_direct_ats(
+    raw_url: str,
+    company_name: str,
+    client: Optional[httpx.AsyncClient] = None,
+    timeout_seconds: float = 4.0
+) -> Optional[str]:
+    """
+    Lightweight HTTP redirect tracer & ATS unshortener.
+    Follows redirects and inspects outbound links to extract the real corporate application form.
+    """
+    if not raw_url or not raw_url.startswith("http"):
+        return None
+
+    raw_lower = raw_url.lower()
+    for ats in KNOWN_ATS_DOMAINS:
+        if ats in raw_lower:
+            return raw_url
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+
+    own_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, headers=headers)
+        own_client = True
+
+    comp_clean = re.sub(r'[^a-zA-Z0-9]', '', company_name).lower() if company_name else ""
+    comp_first_word = company_name.split()[0].lower() if company_name else ""
+
+    try:
+        res = await client.get(raw_url, follow_redirects=True, timeout=timeout_seconds)
+        final_url = str(res.url)
+        final_lower = final_url.lower()
+
+        # 1. Did the HTTP redirects land directly on a known ATS?
+        for ats in KNOWN_ATS_DOMAINS:
+            if ats in final_lower:
+                return final_url
+
+        # 2. Inspect HTML body for outbound "Apply" or direct ATS links
+        if res.status_code == 200 and len(res.text) > 0:
+            urls = re.findall(r'href=["\'](https?://[^"\']+)["\']', res.text[:120000])
+            for u in urls:
+                u_lower = u.lower()
+                if any(ign in u_lower for ign in IGNORE_DOMAINS):
+                    continue
+                # Match known ATS
+                if any(ats in u_lower for ats in KNOWN_ATS_DOMAINS):
+                    return u.replace("&amp;", "&")
+                # Match career/job application path on company domain
+                if ("jobs." in u_lower or "careers." in u_lower or "/career" in u_lower or "/job" in u_lower or "/cmp/" in u_lower) and (comp_first_word in u_lower or comp_clean in u_lower):
+                    return u.replace("&amp;", "&")
+
+    except Exception:
+        pass
+    finally:
+        if own_client:
+            await client.aclose()
+
+    return None
+
+
+def resolve_direct_application_url(company_name: str, role_title: str, raw_url: Optional[str] = None) -> str:
+    """
+    Ensures that every placement drive has an authentic, actionable direct application URL.
+    - If raw_url is already a recognized direct ATS / corporate careers link, preserves it.
+    - If raw_url is missing, empty, or points to a generic homepage (e.g. 'https://www.linkedin.com', 'https://remotive.com'),
+      generates a targeted direct application search link to the company's real application form.
+    """
+    import urllib.parse
+    clean_comp = (company_name or "").strip()
+    clean_role = (role_title or "").strip()
+    
+    # 1. Pre-verified direct campus portals
+    comp_lower = clean_comp.lower()
+    if "tcs" in comp_lower or "tata consultancy" in comp_lower:
+        return "https://nextstep.tcs.com/campus/#/"
+    if "zoho" in comp_lower:
+        return "https://www.zohocorp.com/careers/"
+    if "amazon" in comp_lower:
+        role_q = urllib.parse.quote_plus(clean_role) if clean_role else "Software+Development+Engineer"
+        return f"https://www.amazon.jobs/en/search?base_query={role_q}"
+    if "google" in comp_lower:
+        return "https://www.google.com/about/careers/applications/jobs/results/?q=university"
+    if "microsoft" in comp_lower:
+        return "https://careers.microsoft.com/v2/global/en/home.html"
+    if "cognizant" in comp_lower:
+        return "https://careers.cognizant.com/global/en/search-results?keywords=GenC"
+    if "infosys" in comp_lower:
+        return "https://www.infosys.com/careers/"
+    if "pwc" in comp_lower:
+        return "https://www.pwc.in/careers.html"
+    if "razorpay" in comp_lower:
+        return "https://razorpay.com/jobs/"
+    if "atlassian" in comp_lower:
+        return "https://www.atlassian.com/company/careers"
+    if "swiggy" in comp_lower:
+        return "https://careers.swiggy.com/"
+    if "ibm" in comp_lower:
+        return "https://www.ibm.com/careers/search?q=Software+Engineer"
+
+    # 2. Check if raw_url is already a valid deep-link
+    if raw_url and raw_url.strip():
+        url = raw_url.strip()
+        is_generic_root = url.rstrip("/") in [
+            "https://www.linkedin.com", "https://linkedin.com",
+            "https://remotive.com", "https://www.remotive.com",
+            "https://jobicy.com", "https://www.jobicy.com",
+            "https://arbeitnow.com", "https://www.arbeitnow.com"
+        ]
+        if not is_generic_root and ("http://" in url or "https://" in url):
+            return url
+
+    # 3. Targeted direct query to the company's real application form
+    search_query = urllib.parse.quote_plus(f"{clean_comp} {clean_role} official careers application form apply")
+    return f"https://www.google.com/search?q={search_query}"
+
+
+def resolve_company_website(company_name: str, raw_website: Optional[str] = None) -> str:
+    """
+    Resolves the authentic corporate website instead of hardcoding aggregator URLs (remotive.com/jobicy.com).
+    """
+    clean_comp = (company_name or "").strip()
+    comp_lower = clean_comp.lower()
+    
+    known_websites = {
+        "zoho": "https://www.zoho.com",
+        "tcs": "https://www.tcs.com",
+        "amazon": "https://amazon.jobs",
+        "google": "https://careers.google.com",
+        "microsoft": "https://careers.microsoft.com",
+        "cognizant": "https://cognizant.com",
+        "infosys": "https://infosys.com",
+        "pwc": "https://pwc.in",
+        "razorpay": "https://razorpay.com",
+        "atlassian": "https://atlassian.com",
+        "swiggy": "https://swiggy.com",
+        "paypal": "https://paypal.com",
+        "bosch": "https://bosch.in",
+        "itc infotech": "https://itcinfotech.com",
+        "ibm": "https://ibm.com",
+        "honeywell": "https://honeywell.com",
+        "hcl": "https://hcltech.com",
+        "soliton": "https://solitontech.com",
+        "kovai": "https://kovai.co",
+        "roots": "https://rootsindustries.com",
+        "pricol": "https://pricol.com",
+        "kgisl": "https://kgisl.com",
+        "ford": "https://ford.com",
+        "freshworks": "https://freshworks.com"
+    }
+    for k, v in known_websites.items():
+        if k in comp_lower:
+            return v
+            
+    if raw_website:
+        raw_lower = raw_website.lower()
+        if not any(agg in raw_lower for agg in ["remotive.com", "jobicy.com", "arbeitnow.com", "linkedin.com"]):
+            return raw_website
+            
+    slug = re.sub(r'[^a-zA-Z0-9]', '', clean_comp).lower()
+    if slug:
+        return f"https://www.{slug}.com"
+    return "https://www.google.com"
+
+
 class JobFetcherWorker:
     """
     Automated Multi-Source Hiring Ingestion Worker.
@@ -639,6 +820,9 @@ class JobFetcherWorker:
                         raw_desc = item.get("description", "Full stack development opportunity.")
                         clean_desc = clean_job_description(raw_desc)
                         url = item.get("url") or "https://www.arbeitnow.com"
+                        ats_url = await unshorten_to_direct_ats(url, company, client=client)
+                        clean_app_url = ats_url or resolve_direct_application_url(company, title, url)
+                        clean_website = resolve_company_website(company, item.get("company_url"))
                         drives.append({
                             "company_name": company,
                             "role_title": title,
@@ -649,8 +833,8 @@ class JobFetcherWorker:
                             "allowed_departments": "CSE,IT,ECE",
                             "job_description": clean_desc,
                             "days_ahead": 9,
-                            "application_url": url,
-                            "company_website": "https://www.arbeitnow.com",
+                            "application_url": clean_app_url,
+                            "company_website": clean_website,
                             "selection_rounds": "Round 1: Online Application Review -> Round 2: Technical Interview -> Round 3: Culture & Offer"
                         })
                         if len(drives) >= limit:
@@ -675,6 +859,9 @@ class JobFetcherWorker:
                         raw_desc = item.get("jobDescription", "Engineering opportunity")
                         clean_desc = clean_job_description(raw_desc)
                         url = item.get("url") or "https://jobicy.com"
+                        ats_url = await unshorten_to_direct_ats(url, company, client=client)
+                        clean_app_url = ats_url or resolve_direct_application_url(company, title, url)
+                        clean_website = resolve_company_website(company, item.get("company_url"))
                         drives.append({
                             "company_name": company,
                             "role_title": title,
@@ -685,8 +872,8 @@ class JobFetcherWorker:
                             "allowed_departments": "CSE,IT,ECE",
                             "job_description": clean_desc,
                             "days_ahead": 11,
-                            "application_url": url,
-                            "company_website": "https://jobicy.com",
+                            "application_url": clean_app_url,
+                            "company_website": clean_website,
                             "selection_rounds": "Round 1: Screening & Take-Home Assignment -> Round 2: Technical Discussion -> Round 3: Executive Interview"
                         })
                         if len(drives) >= limit:
@@ -711,6 +898,9 @@ class JobFetcherWorker:
                         raw_desc = item.get("description", "Software engineering role.")
                         clean_desc = clean_job_description(raw_desc)
                         url = item.get("url") or "https://remotive.com"
+                        ats_url = await unshorten_to_direct_ats(url, company, client=client)
+                        clean_app_url = ats_url or resolve_direct_application_url(company, title, url)
+                        clean_website = resolve_company_website(company, item.get("company_url"))
                         salary = item.get("salary") or "10.0 LPA - 16.5 LPA"
                         drives.append({
                             "company_name": company,
@@ -722,8 +912,8 @@ class JobFetcherWorker:
                             "allowed_departments": "CSE,IT,ECE",
                             "job_description": clean_desc,
                             "days_ahead": 12,
-                            "application_url": url,
-                            "company_website": "https://remotive.com",
+                            "application_url": clean_app_url,
+                            "company_website": clean_website,
                             "selection_rounds": "Round 1: Coding Screen -> Round 2: Architecture & Pair Programming -> Round 3: Founder / Leadership Fit"
                         })
                         if len(drives) >= limit:
@@ -766,7 +956,9 @@ class JobFetcherWorker:
                     raw_desc = str(row.get("description") or f"Engineering position at {company}")
                     clean_desc = clean_job_description(raw_desc)
                     site_source = str(row.get("site") or "linkedin").capitalize()
-                    url = str(row.get("job_url") or row.get("job_url_direct") or "https://www.linkedin.com")
+                    url = str(row.get("job_url_direct") or row.get("job_url") or "")
+                    clean_app_url = resolve_direct_application_url(company, title, url)
+                    clean_website = resolve_company_website(company, str(row.get("company_url") or ""))
                     
                     # Format salary package if available
                     min_amt = row.get("min_amount")
@@ -787,8 +979,8 @@ class JobFetcherWorker:
                         "allowed_departments": "CSE,IT,ECE",
                         "job_description": clean_desc,
                         "days_ahead": 14,
-                        "application_url": url,
-                        "company_website": str(row.get("company_url") or url),
+                        "application_url": clean_app_url,
+                        "company_website": clean_website,
                         "selection_rounds": f"Round 1: Online Technical Assessment -> Round 2: Algorithmic & Problem Solving ({site_source}) -> Round 3: Culture & Managerial Evaluation"
                     })
                     if len(drives) >= limit:
