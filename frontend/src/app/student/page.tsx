@@ -42,7 +42,8 @@ import {
   Terminal,
   Power,
   MessageSquare,
-  Copy
+  Copy,
+  Upload
 } from "lucide-react";
 
 function formatJobDescription(desc?: string): string {
@@ -265,6 +266,10 @@ ${note}
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [cgpaInput, setCgpaInput] = useState("8.65");
   const [arrearsInput, setArrearsInput] = useState("0");
+  const [graduationYearInput, setGraduationYearInput] = useState("2026");
+  const [departmentCodeInput, setDepartmentCodeInput] = useState("CSE");
+  const [uploadingResume, setUploadingResume] = useState(false);
+  const [resumeExtractPreview, setResumeExtractPreview] = useState<any>(null);
   const [targetCompanies, setTargetCompanies] = useState("Amazon, Zoho, TCS");
   const [targetMinCtc, setTargetMinCtc] = useState("8.0 LPA");
   const [telegramChatId, setTelegramChatId] = useState("@suresh_kannan");
@@ -329,7 +334,14 @@ ${note}
       if (meData?.profile) {
         if (meData.profile.cgpa) setCgpaInput(String(meData.profile.cgpa));
         if (meData.profile.standing_arrears !== undefined) setArrearsInput(String(meData.profile.standing_arrears));
+        if (meData.profile.graduation_year) setGraduationYearInput(String(meData.profile.graduation_year));
         if (meData.profile.telegram_chat_id) setTelegramChatId(meData.profile.telegram_chat_id);
+        if (meData.profile.phone_number) setApplyPhone(meData.profile.phone_number);
+        if (meData.profile.github_url) setApplyGithub(meData.profile.github_url);
+        if (meData.profile.linkedin_url) setApplyLinkedin(meData.profile.linkedin_url);
+      }
+      if (meData?.department_code) {
+        setDepartmentCodeInput(meData.department_code);
       }
 
       // Restore saved custom BYOK AI configuration
@@ -654,6 +666,61 @@ ${note}
     }
   };
 
+  const handleResumeUploadForAcademic = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      setMsg("Please select a PDF resume file.");
+      return;
+    }
+
+    setUploadingResume(true);
+    setResumeExtractPreview(null);
+    try {
+      const res = await api.uploadResume(file, false);
+      const ext = res?.extracted_academic || {};
+      const foundFields: string[] = [];
+
+      if (ext.cgpa !== null && ext.cgpa !== undefined) {
+        setCgpaInput(String(ext.cgpa));
+        foundFields.push(`CGPA: ${ext.cgpa}`);
+      }
+      if (ext.graduation_year) {
+        setGraduationYearInput(String(ext.graduation_year));
+        foundFields.push(`Batch: ${ext.graduation_year}`);
+      }
+      if (ext.department_code) {
+        setDepartmentCodeInput(ext.department_code);
+        foundFields.push(`Dept: ${ext.department_code}`);
+      }
+      if (ext.phone_number) {
+        setApplyPhone(ext.phone_number);
+        foundFields.push(`Phone: ${ext.phone_number}`);
+      }
+      if (ext.github_url) {
+        setApplyGithub(ext.github_url);
+        foundFields.push("GitHub");
+      }
+      if (ext.linkedin_url) {
+        setApplyLinkedin(ext.linkedin_url);
+        foundFields.push("LinkedIn");
+      }
+
+      setResumeExtractPreview({
+        filename: res.filename || file.name,
+        ats_score: res.ats_score,
+        skills: res.skills || [],
+        warnings: ext.warnings || [],
+        foundFields,
+      });
+    } catch (err: any) {
+      setMsg(`Resume upload failed: ${err.message}`);
+    } finally {
+      setUploadingResume(false);
+    }
+  };
+
   const handleSaveProfileSettings = async () => {
     setSavingSettings(true);
     try {
@@ -665,15 +732,25 @@ ${note}
         api_key: aiApiKey
       });
 
+      const parsedCgpa = parseFloat(cgpaInput);
+      const parsedArrears = parseInt(arrearsInput, 10);
+      const parsedGradYear = parseInt(graduationYearInput, 10);
+
       await api.updateStudentProfile({
-        cgpa: parseFloat(cgpaInput),
-        standing_arrears: parseInt(arrearsInput),
+        cgpa: Number.isFinite(parsedCgpa) ? parsedCgpa : undefined,
+        standing_arrears: Number.isFinite(parsedArrears) ? parsedArrears : undefined,
+        graduation_year: Number.isFinite(parsedGradYear) ? parsedGradYear : undefined,
+        department_code: departmentCodeInput || undefined,
+        phone_number: applyPhone || undefined,
+        github_url: applyGithub || undefined,
+        linkedin_url: applyLinkedin || undefined,
         telegram_chat_id: telegramChatId,
       });
       const meData = await api.getMe();
       setProfile(meData);
+      setResumeExtractPreview(null);
       setMsg("Settings, Academic Profile, and AI Configuration saved successfully!");
-      const updatedDrives = await api.getDrives();
+      const updatedDrives = await api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined);
       setDrives(updatedDrives);
     } catch (e: any) {
       alert(`Save failed: ${e.message}`);
@@ -2156,7 +2233,7 @@ ${note}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Award className="w-5 h-5 text-indigo-600" />
-                  <h3 className="font-bold text-sm text-slate-900">Academic & Eligibility Data</h3>
+                  <h3 className="font-bold text-sm text-slate-900">Academic &amp; Eligibility Data</h3>
                 </div>
                 <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                   Drive Matching
@@ -2164,8 +2241,100 @@ ${note}
               </div>
 
               <p className="text-xs text-slate-500">
-                Your academic metrics determine which campus placement drives you are eligible to register for:
+                Upload your PDF resume to auto-fill academic &amp; contact details, or update your metrics manually for campus eligibility checks:
               </p>
+
+              {/* Upload Resume PDF to Auto-Fill */}
+              <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-950">
+                    <FileText className="w-4 h-4 text-indigo-600" />
+                    <span>Auto-Fill from Resume (PDF)</span>
+                  </div>
+                  <p className="text-[11px] text-indigo-700">
+                    Extracts CGPA, batch year, branch, phone, GitHub &amp; LinkedIn cleanly for review before saving.
+                  </p>
+                </div>
+                <label
+                  htmlFor="academic-resume-upload"
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0 transition shadow-sm cursor-pointer ${
+                    uploadingResume
+                      ? "bg-indigo-300 text-white cursor-wait"
+                      : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                  }`}
+                >
+                  {uploadingResume ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Reading PDF...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Upload PDF</span>
+                    </>
+                  )}
+                  <input
+                    id="academic-resume-upload"
+                    type="file"
+                    accept=".pdf,application/pdf"
+                    disabled={uploadingResume}
+                    onChange={handleResumeUploadForAcademic}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              {/* Extracted Data Review Banner */}
+              {resumeExtractPreview && (
+                <div className="p-3.5 rounded-xl bg-emerald-50/80 border border-emerald-200 space-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="font-bold text-emerald-900 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>Extracted from {resumeExtractPreview.filename}</span>
+                    </span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white text-emerald-700 border border-emerald-200">
+                      ATS Score: {Math.round(resumeExtractPreview.ats_score || 0)}/100
+                    </span>
+                  </div>
+                  {resumeExtractPreview.foundFields?.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {resumeExtractPreview.foundFields.map((tag: string, i: number) => (
+                        <span key={i} className="px-2 py-0.5 rounded-md bg-white border border-emerald-200 text-emerald-800 text-[11px] font-semibold">
+                          ✓ {tag}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-amber-800">No academic fields were matched automatically in this file.</p>
+                  )}
+                  {resumeExtractPreview.warnings?.length > 0 && (
+                    <ul className="space-y-0.5 text-[11px] text-amber-800 list-disc list-inside">
+                      {resumeExtractPreview.warnings.map((w: string, i: number) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="pt-1 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setResumeExtractPreview(null)}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-slate-600 font-semibold text-[11px] cursor-pointer"
+                    >
+                      Dismiss
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveProfileSettings}
+                      disabled={savingSettings}
+                      className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      <Save className="w-3 h-3" />
+                      <span>{savingSettings ? "Saving..." : "Confirm & Save Academic Data"}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div>
@@ -2188,6 +2357,62 @@ ${note}
                     value={arrearsInput}
                     onChange={(e) => setArrearsInput(e.target.value)}
                     className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700">Graduation Year</label>
+                  <input
+                    type="number"
+                    min="2020"
+                    max="2035"
+                    value={graduationYearInput}
+                    onChange={(e) => setGraduationYearInput(e.target.value)}
+                    className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700">Department / Branch</label>
+                  <select
+                    value={departmentCodeInput}
+                    onChange={(e) => setDepartmentCodeInput(e.target.value)}
+                    className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold bg-white"
+                  >
+                    {["CSE", "IT", "ECE", "EEE", "MECH", "CIVIL", "AIDS", "AIML"].map((dept) => (
+                      <option key={dept} value={dept}>{dept}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                <div>
+                  <label className="font-semibold text-slate-700">Phone Number</label>
+                  <input
+                    type="text"
+                    value={applyPhone}
+                    onChange={(e) => setApplyPhone(e.target.value)}
+                    placeholder="+91 98765 43210"
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700">GitHub URL</label>
+                  <input
+                    type="text"
+                    value={applyGithub}
+                    onChange={(e) => setApplyGithub(e.target.value)}
+                    placeholder="https://github.com/..."
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700">LinkedIn URL</label>
+                  <input
+                    type="text"
+                    value={applyLinkedin}
+                    onChange={(e) => setApplyLinkedin(e.target.value)}
+                    placeholder="https://linkedin.com/in/..."
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
               </div>

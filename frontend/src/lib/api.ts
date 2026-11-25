@@ -149,6 +149,29 @@ export const api = {
 
   // Resume
   getMyResume: () => request("/resume/my-resume"),
+  uploadResume: async (file: File, autoApply: boolean = false) => {
+    const token = getToken();
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("auto_apply", String(autoApply));
+    const customConfig = getCustomAiConfig();
+    if (customConfig) {
+      formData.append("custom_config_json", JSON.stringify(customConfig));
+    }
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE}/resume/upload`, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({ detail: "Resume upload failed" }));
+      throw new Error(errorData.detail || `HTTP Error ${res.status}`);
+    }
+    return res.json();
+  },
   parseTextResume: (raw_text: string, provider?: string, custom_config?: any) => {
     const customConfig = custom_config || getCustomAiConfig();
     return request("/resume/parse-text", {

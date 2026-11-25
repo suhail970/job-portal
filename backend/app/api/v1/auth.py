@@ -156,10 +156,17 @@ def get_me(current_user: User = Depends(get_current_user), session: Session = De
             college_name = col.name
             
     student_profile = None
+    department_code = None
+    department_name = None
     if current_user.role == UserRole.STUDENT:
         student_profile = session.exec(
             select(StudentProfile).where(StudentProfile.user_id == current_user.id)
         ).first()
+        if student_profile and student_profile.department_id:
+            dept = session.get(Department, student_profile.department_id)
+            if dept:
+                department_code = dept.code
+                department_name = f"{dept.name} ({dept.code})"
 
     return {
         "id": current_user.id,
@@ -168,5 +175,7 @@ def get_me(current_user: User = Depends(get_current_user), session: Session = De
         "role": current_user.role.value,
         "college_id": current_user.college_id,
         "college_name": college_name,
+        "department_code": department_code,
+        "department_name": department_name,
         "profile": student_profile
     }

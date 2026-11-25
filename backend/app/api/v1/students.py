@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from typing import List, Optional
 from pydantic import BaseModel
 from app.core.database import get_session
@@ -13,6 +13,8 @@ class UpdateProfileRequest(BaseModel):
     cgpa: Optional[float] = None
     standing_arrears: Optional[int] = None
     history_arrears: Optional[int] = None
+    graduation_year: Optional[int] = None
+    department_code: Optional[str] = None
     phone_number: Optional[str] = None
     bio: Optional[str] = None
     github_url: Optional[str] = None
@@ -29,10 +31,12 @@ def get_student_profile(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student profile not found")
 
     dept_name = None
+    dept_code = None
     if student.department_id:
         dept = session.get(Department, student.department_id)
         if dept:
             dept_name = f"{dept.name} ({dept.code})"
+            dept_code = dept.code
 
     # Applications count
     apps_count = len(session.exec(select(Application).where(Application.student_id == student.id)).all())
@@ -40,6 +44,7 @@ def get_student_profile(
     return {
         "profile": student,
         "department_name": dept_name,
+        "department_code": dept_code,
         "full_name": current_user.full_name,
         "email": current_user.email,
         "total_applications": apps_count
@@ -56,11 +61,30 @@ def update_student_profile(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student profile not found")
 
     if req.cgpa is not None:
-        student.cgpa = req.cgpa
+        if req.cgpa < 0.0 or req.cgpa > 10.0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CGPA must be between 0.0 and 10.0")
+        student.cgpa = round(req.cgpa, 2)
     if req.standing_arrears is not None:
+        if req.standing_arrears < 0 or req.standing_arrears > 50:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Standing arrears must be between 0 and 50")
         student.standing_arrears = req.standing_arrears
     if req.history_arrears is not None:
+        if req.history_arrears < 0 or req.history_arrears > 50:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="History of arrears must be between 0 and 50")
         student.history_arrears = req.history_arrears
+    if req.graduation_year is not None:
+        if req.graduation_year < 2020 or req.graduation_year > 2035:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Graduation year must be between 2020 and 2035")
+        student.graduation_year = req.graduation_year
+    if req.department_code is not None and req.department_code.strip():
+        dept = session.exec(
+            select(Department).where(
+                Department.college_id == student.college_id,
+                func.upper(Department.code) == req.department_code.strip().upper(),
+            )
+        ).first()
+        if dept:
+            student.department_id = dept.id
     if req.phone_number is not None:
         student.phone_number = req.phone_number
     if req.bio is not None:
@@ -75,7 +99,21 @@ def update_student_profile(
     session.add(student)
     session.commit()
     session.refresh(student)
-    return {"message": "Profile updated successfully", "profile": student}
+
+    dept_code = None
+    dept_name = None
+    if student.department_id:
+        dept = session.get(Department, student.department_id)
+        if dept:
+            dept_code = dept.code
+            dept_name = f"{dept.name} ({dept.code})"
+
+    return {
+        "message": "Profile updated successfully",
+        "profile": student,
+        "department_code": dept_code,
+        "department_name": dept_name,
+    }
 
 @router.get("/leaderboard")
 def get_college_students_leaderboard(
