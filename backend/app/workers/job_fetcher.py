@@ -1,15 +1,24 @@
 import asyncio
+import json
 import httpx
 import logging
 import html
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 from sqlmodel import Session, select, func
 from app.core.database import engine
 from app.models.entities import PlacementDrive
 from app.models.enums import DriveStatus
 from app.workers.telegram_worker import telegram_worker
+from app.workers.ats_verifier import (
+    classify_region_scope,
+    detect_source_platform,
+    is_valid_direct_url,
+    extract_ats_form_schema,
+    verify_application_link_and_expiry,
+    compute_job_accuracy_score,
+)
 
 logger = logging.getLogger("skillbridge.fetcher")
 
@@ -597,19 +606,35 @@ def clean_job_description(raw_text: str, max_chars: int = 1800) -> str:
 
 def is_engineering_role(title: str) -> bool:
     """
-    Filters out non-technical roles (customer service, warehouse, clinical, content reviewer)
-    from general job feeds to keep campus recruitment drives strictly tech/engineering-focused.
+    Filters out non-technical roles (customer service, warehouse, clinical, content reviewer,
+    freelance AI trainers, language specialists, sales/marketing) to keep drives strictly tech/engineering.
     """
-    title_lower = title.lower()
+    title_lower = (title or "").lower()
     excluded_keywords = [
-        "content reviewer", "customer service", "sales representative", "warehouse", 
-        "hr generalist", "hr business partner", "patient care advocate", "clinical research",
-        "talent acquisition", "kundenberater", "flächenakquisi", "finance assistant", "cfo", "cra ii"
+        "content reviewer", "customer service", "sales representative", "inside sales",
+        "account executive", "business development", "warehouse", "office assistant",
+        "hr generalist", "hr business partner", "patient care", "clinical research",
+        "talent acquisition", "recruiter", "kundenberater", "flächenakquisi",
+        "finance assistant", "accountant", "controller", "cfo", "cra ii",
+        "language specialist", "ai trainer", "freelance", "content creator",
+        "social media", "copywriter", "legal counsel", "attorney", "real estate",
+        "construction manager", "partner manager", "medical", "nurse", "therapist",
     ]
     for kw in excluded_keywords:
         if kw in title_lower:
             return False
-    return True
+
+    tech_keywords = [
+        "engineer", "developer", "software", "sde", "swe", "programmer",
+        "architect", "devops", "sre", "cloud", "data", "ai", "ml",
+        "machine learning", "backend", "frontend", "full stack", "fullstack",
+        "mobile", "ios", "android", "security", "qa", "test", "automation",
+        "embedded", "firmware", "systems", "platform", "infrastructure",
+        "database", "it consultant", "technology", "technical", "cyber",
+        "product analyst", "intern", "graduate", "trainee", "analyst",
+        "autosar", "blockchain", "rust", "golang", "python", "java",
+    ]
+    return any(kw in title_lower for kw in tech_keywords)
 
 
 KNOWN_ATS_DOMAINS = [
@@ -795,235 +820,481 @@ def resolve_company_website(company_name: str, raw_website: Optional[str] = None
 
 class JobFetcherWorker:
     """
-    Automated Multi-Source Hiring Ingestion Worker.
-    Pulls live developer jobs from public feeds and verified campus hiring tracks,
-    deduplicates against existing drives, and stores them under the active college tenant.
+    Automated Multi-Source Verified Hiring Ingestion Worker.
+    Pulls live developer jobs strictly from verified ATS APIs (Greenhouse, Ashby, SmartRecruiters, Lever),
+    community-verified SimplifyJobs GitHub feeds, and curated campus tracks.
+    Rejects unverified aggregator traps, synthetic clones, duplicates, and expired postings.
     """
 
     def __init__(self):
         self.last_sync_time: Optional[datetime] = None
         self.last_sync_count: int = 0
+        self._verify_cache: Dict[str, Tuple[datetime, Dict[str, Any]]] = {}
 
-    async def fetch_from_arbeitnow(self, limit: int = 15) -> List[Dict[str, Any]]:
-        """Fetch developer postings from Arbeitnow public API."""
-        drives = []
+    @staticmethod
+    def _parse_iso_dt(val: Optional[str]) -> Optional[datetime]:
+        if not val:
+            return None
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                res = await client.get("https://www.arbeitnow.com/api/job-board-api")
-                if res.status_code == 200:
-                    data = res.json().get("data", [])
-                    for item in data:
-                        title = item.get("title", "Software Developer")
-                        if not is_engineering_role(title):
-                            continue
-                        company = item.get("company_name", "Tech Global")
-                        raw_desc = item.get("description", "Full stack development opportunity.")
-                        clean_desc = clean_job_description(raw_desc)
-                        url = item.get("url") or "https://www.arbeitnow.com"
-                        ats_url = await unshorten_to_direct_ats(url, company, client=client)
-                        clean_app_url = ats_url or resolve_direct_application_url(company, title, url)
-                        clean_website = resolve_company_website(company, item.get("company_url"))
-                        drives.append({
-                            "company_name": company,
-                            "role_title": title,
-                            "location": item.get("location", "Pan India / Hybrid / Remote"),
-                            "salary_package": "12.0 LPA - 18.0 LPA",
-                            "min_cgpa": 7.0,
-                            "max_arrears": 0,
-                            "allowed_departments": "CSE,IT,ECE",
-                            "job_description": clean_desc,
-                            "days_ahead": 9,
-                            "application_url": clean_app_url,
-                            "company_website": clean_website,
-                            "selection_rounds": "Round 1: Online Application Review -> Round 2: Technical Interview -> Round 3: Culture & Offer"
-                        })
-                        if len(drives) >= limit:
-                            break
-        except Exception as e:
-            logger.warning(f"Arbeitnow fetch failed: {e}")
-        return drives
+            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
 
-    async def fetch_from_jobicy(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Fetch tech postings from Jobicy public API."""
-        drives = []
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                res = await client.get("https://jobicy.com/api/v2/remote-jobs?count=20")
-                if res.status_code == 200:
-                    jobs = res.json().get("jobs", [])
-                    for item in jobs:
-                        title = item.get("jobTitle", "Engineer")
-                        if not is_engineering_role(title):
-                            continue
-                        company = item.get("companyName", "Innovative Software")
-                        raw_desc = item.get("jobDescription", "Engineering opportunity")
-                        clean_desc = clean_job_description(raw_desc)
-                        url = item.get("url") or "https://jobicy.com"
-                        ats_url = await unshorten_to_direct_ats(url, company, client=client)
-                        clean_app_url = ats_url or resolve_direct_application_url(company, title, url)
-                        clean_website = resolve_company_website(company, item.get("company_url"))
-                        drives.append({
-                            "company_name": company,
-                            "role_title": title,
-                            "location": item.get("jobGeo", "Pan India / Remote"),
-                            "salary_package": "14.0 LPA - 22.0 LPA",
-                            "min_cgpa": 7.0,
-                            "max_arrears": 0,
-                            "allowed_departments": "CSE,IT,ECE",
-                            "job_description": clean_desc,
-                            "days_ahead": 11,
-                            "application_url": clean_app_url,
-                            "company_website": clean_website,
-                            "selection_rounds": "Round 1: Screening & Take-Home Assignment -> Round 2: Technical Discussion -> Round 3: Executive Interview"
-                        })
-                        if len(drives) >= limit:
-                            break
-        except Exception as e:
-            logger.warning(f"Jobicy fetch failed: {e}")
-        return drives
+    def _build_candidate(
+        self,
+        *,
+        company_name: str,
+        role_title: str,
+        location: str,
+        job_description: str,
+        application_url: str,
+        source_platform: str,
+        salary_package: str = "12.0 LPA - 22.0 LPA",
+        min_cgpa: float = 7.0,
+        max_arrears: int = 0,
+        allowed_departments: str = "CSE,IT,ECE",
+        days_ahead: int = 10,
+        company_website: Optional[str] = None,
+        selection_rounds: Optional[str] = None,
+        expected_fields: Optional[str] = None,
+        schema_source: Optional[str] = None,
+        deadline_dt: Optional[datetime] = None,
+        force_region: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Normalizes a fetched job into a unified candidate structure."""
+        clean_desc = clean_job_description(job_description)
+        region = force_region or classify_region_scope(location, clean_desc)
+        detected_src = detect_source_platform(application_url, source_platform)
+        return {
+            "company_name": company_name.strip(),
+            "role_title": role_title.strip(),
+            "location": (location or "Pan India / Remote").strip(),
+            "region_scope": region,
+            "salary_package": salary_package,
+            "min_cgpa": min_cgpa,
+            "max_arrears": max_arrears,
+            "allowed_departments": allowed_departments,
+            "job_description": clean_desc,
+            "days_ahead": days_ahead,
+            "deadline_dt": deadline_dt,
+            "application_url": application_url.strip(),
+            "company_website": resolve_company_website(company_name, company_website),
+            "selection_rounds": selection_rounds or "Round 1: Online Assessment -> Round 2: Technical DSA & System Design -> Round 3: Cultural Fitment",
+            "source_platform": detected_src,
+            "form_type": "DIRECT_FORM",
+            "expected_fields": expected_fields,
+            "schema_source": schema_source,
+        }
 
-    async def fetch_from_remotive(self, limit: int = 15) -> List[Dict[str, Any]]:
-        """Fetch live developer jobs from Remotive public API."""
-        drives = []
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                res = await client.get("https://remotive.com/api/remote-jobs?category=software-dev&limit=25")
-                if res.status_code == 200:
-                    jobs = res.json().get("jobs", [])
-                    for item in jobs:
-                        title = item.get("title", "Software Developer")
-                        if not is_engineering_role(title):
-                            continue
-                        company = item.get("company_name", "Tech Startup")
-                        raw_desc = item.get("description", "Software engineering role.")
-                        clean_desc = clean_job_description(raw_desc)
-                        url = item.get("url") or "https://remotive.com"
-                        ats_url = await unshorten_to_direct_ats(url, company, client=client)
-                        clean_app_url = ats_url or resolve_direct_application_url(company, title, url)
-                        clean_website = resolve_company_website(company, item.get("company_url"))
-                        salary = item.get("salary") or "10.0 LPA - 16.5 LPA"
-                        drives.append({
-                            "company_name": company,
-                            "role_title": title,
-                            "location": item.get("candidate_required_location", "Pan India / Remote"),
-                            "salary_package": salary,
-                            "min_cgpa": 6.8,
-                            "max_arrears": 0,
-                            "allowed_departments": "CSE,IT,ECE",
-                            "job_description": clean_desc,
-                            "days_ahead": 12,
-                            "application_url": clean_app_url,
-                            "company_website": clean_website,
-                            "selection_rounds": "Round 1: Coding Screen -> Round 2: Architecture & Pair Programming -> Round 3: Founder / Leadership Fit"
-                        })
-                        if len(drives) >= limit:
-                            break
-        except Exception as e:
-            logger.warning(f"Remotive fetch failed: {e}")
-        return drives
-
-    async def fetch_from_greenhouse(self, limit: int = 10, company_slugs: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    async def _fetch_verified_aggregator(
+        self,
+        *,
+        source_name: str,
+        api_url: str,
+        items_key: str,
+        limit: int,
+        field_map: Dict[str, str],
+        default_salary: str,
+    ) -> List[Dict[str, Any]]:
         """
-        Pulls authentic direct developer job postings from official Greenhouse Public APIs.
-        Returns 100% direct application URLs ending in #app with complete ATS reliability.
+        Shared helper for public aggregator APIs (Arbeitnow, Jobicy, Remotive).
+        Strictly retains ONLY entries whose URL resolves to a direct corporate/ATS destination.
         """
-        drives = []
-        slugs = company_slugs or ["gitlab", "canonical", "cloudflare"]
+        drives: List[Dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                for slug in slugs:
-                    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
-                    try:
-                        res = await client.get(url)
-                        if res.status_code == 200:
-                            data = res.json()
-                            jobs = data.get("jobs", [])
-                            comp_name = "GitLab" if slug == "gitlab" else ("Cloudflare" if slug == "cloudflare" else slug.replace("-", " ").capitalize())
-
-                            for j in jobs:
-                                title = j.get("title", "")
-                                if not is_engineering_role(title):
-                                    continue
-                                raw_url = j.get("absolute_url", "")
-                                app_url = f"{raw_url}#app" if raw_url and "#app" not in raw_url else raw_url
-                                
-                                loc = "Remote / Global"
-                                if j.get("location") and isinstance(j.get("location"), dict):
-                                    loc = j["location"].get("name", loc)
-
-                                drives.append({
-                                    "company_name": comp_name,
-                                    "role_title": title,
-                                    "location": loc,
-                                    "salary_package": "12.0 LPA - 22.0 LPA",
-                                    "min_cgpa": 7.0,
-                                    "max_arrears": 0,
-                                    "allowed_departments": "CSE,IT,ECE",
-                                    "job_description": f"Direct engineering opening at {comp_name}. Ingested via official Greenhouse ATS API.",
-                                    "days_ahead": 10,
-                                    "application_url": app_url,
-                                    "company_website": f"https://www.{slug}.com",
-                                    "selection_rounds": "Round 1: Online Screening Assessment -> Round 2: Technical Deep Dive -> Round 3: Engineering Architecture & Fit",
-                                    "form_type": "DIRECT_FORM",
-                                    "verification_status": "VERIFIED_ACTIVE",
-                                    "expected_fields": '["Full Name", "Email", "Phone", "Resume PDF", "LinkedIn Profile", "GitHub URL"]'
-                                })
-                                if len(drives) >= limit:
-                                    break
-                    except Exception as e:
-                        logger.warning(f"Failed Greenhouse fetch for {slug}: {e}")
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                res = await client.get(api_url)
+                if res.status_code != 200:
+                    return drives
+                items = res.json().get(items_key, [])
+                for item in items:
+                    title = item.get(field_map["title"], "")
+                    if not is_engineering_role(title):
+                        continue
+                    company = item.get(field_map["company"], "")
+                    if not company:
+                        continue
+                    raw_url = item.get(field_map["url"]) or ""
+                    ats_url = await unshorten_to_direct_ats(raw_url, company, client=client, timeout_seconds=8.0)
+                    if not ats_url or not is_valid_direct_url(ats_url):
+                        continue  # Reject unverified aggregator pages / search fallbacks
+                    loc = item.get(field_map["location"]) or "Remote"
+                    desc = item.get(field_map["desc"]) or ""
+                    sal = item.get("salary") or default_salary
+                    drives.append(
+                        self._build_candidate(
+                            company_name=company,
+                            role_title=title,
+                            location=str(loc),
+                            job_description=desc,
+                            application_url=ats_url,
+                            source_platform=source_name,
+                            salary_package=str(sal),
+                            company_website=item.get("company_url"),
+                        )
+                    )
                     if len(drives) >= limit:
                         break
+        except Exception as e:
+            logger.warning(f"{source_name} fetch failed: {e}")
+        return drives
+
+    async def fetch_from_arbeitnow(self, limit: int = 8) -> List[Dict[str, Any]]:
+        return await self._fetch_verified_aggregator(
+            source_name="ARBEITNOW",
+            api_url="https://www.arbeitnow.com/api/job-board-api",
+            items_key="data",
+            limit=limit,
+            field_map={"title": "title", "company": "company_name", "url": "url", "location": "location", "desc": "description"},
+            default_salary="12.0 LPA - 18.0 LPA",
+        )
+
+    async def fetch_from_jobicy(self, limit: int = 6) -> List[Dict[str, Any]]:
+        return await self._fetch_verified_aggregator(
+            source_name="JOBICY",
+            api_url="https://jobicy.com/api/v2/remote-jobs?count=20",
+            items_key="jobs",
+            limit=limit,
+            field_map={"title": "jobTitle", "company": "companyName", "url": "url", "location": "jobGeo", "desc": "jobDescription"},
+            default_salary="14.0 LPA - 22.0 LPA",
+        )
+
+    async def fetch_from_remotive(self, limit: int = 8) -> List[Dict[str, Any]]:
+        return await self._fetch_verified_aggregator(
+            source_name="REMOTIVE",
+            api_url="https://remotive.com/api/remote-jobs?category=software-dev&limit=25",
+            items_key="jobs",
+            limit=limit,
+            field_map={"title": "title", "company": "company_name", "url": "url", "location": "candidate_required_location", "desc": "description"},
+            default_salary="10.0 LPA - 16.5 LPA",
+        )
+
+    async def fetch_from_greenhouse(self, limit: int = 16, company_slugs: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Fetches verified jobs from Greenhouse public API with ?content=true (real descriptions),
+        filters out expired deadlines, prioritizes India & Remote openings alongside Global roles,
+        and pulls actual per-job form questions via ?questions=true.
+        """
+        drives: List[Dict[str, Any]] = []
+        slugs = company_slugs or ["stripe", "databricks", "gitlab", "coinbase", "airbnb", "rubrik", "cloudflare"]
+        name_map = {
+            "gitlab": "GitLab",
+            "cloudflare": "Cloudflare",
+            "stripe": "Stripe",
+            "databricks": "Databricks",
+            "coinbase": "Coinbase",
+            "airbnb": "Airbnb",
+            "rubrik": "Rubrik",
+        }
+        now = datetime.now(timezone.utc)
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                all_hits: List[Dict[str, Any]] = []
+                for slug in slugs:
+                    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+                    try:
+                        res = await client.get(url)
+                        if res.status_code != 200:
+                            continue
+                        jobs = res.json().get("jobs", [])
+                        comp_name = name_map.get(slug, slug.replace("-", " ").title())
+                        per_comp_count = 0
+                        for j in jobs:
+                            title = j.get("title", "")
+                            if not is_engineering_role(title):
+                                continue
+                            dl_dt = self._parse_iso_dt(j.get("application_deadline"))
+                            if dl_dt and dl_dt < now:
+                                continue
+                            raw_url = j.get("absolute_url", "")
+                            if not raw_url:
+                                continue
+                            app_url = f"{raw_url}#app" if "#app" not in raw_url else raw_url
+                            loc = (j.get("location") or {}).get("name") or "Remote"
+                            desc = j.get("content") or f"Direct engineering role at {comp_name}."
+                            cand = self._build_candidate(
+                                company_name=comp_name,
+                                role_title=title,
+                                location=loc,
+                                job_description=desc,
+                                application_url=app_url,
+                                source_platform="GREENHOUSE",
+                                salary_package="18.0 LPA - 34.0 LPA",
+                                company_website=f"https://www.{slug}.com",
+                                deadline_dt=dl_dt,
+                            )
+                            all_hits.append(cand)
+                            per_comp_count += 1
+                            if per_comp_count >= 4:
+                                break
+                    except Exception as e:
+                        logger.warning(f"Greenhouse fetch failed for {slug}: {e}")
+
+                # Sort India -> Remote -> Global so India & Remote always populate cleanly alongside Global
+                priority = {"INDIA": 0, "REMOTE": 1, "GLOBAL": 2}
+                all_hits.sort(key=lambda c: priority.get(c["region_scope"], 3))
+                drives = all_hits[:limit]
+
+                # Fetch real per-job form questions for top Greenhouse jobs concurrently
+                async def _enrich_gh(c: Dict[str, Any]) -> None:
+                    schema = await extract_ats_form_schema(c["application_url"], c["company_name"], client=client)
+                    if schema.get("fields"):
+                        c["expected_fields"] = json.dumps(schema["fields"])
+                        c["schema_source"] = schema.get("schema_source")
+
+                await asyncio.gather(*[_enrich_gh(c) for c in drives[:8]], return_exceptions=True)
         except Exception as e:
             logger.warning(f"Error in fetch_from_greenhouse: {e}")
         return drives
 
-    async def fetch_from_lever(self, limit: int = 10, company_slugs: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    async def fetch_from_ashby(self, limit: int = 12, company_slugs: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
-        Pulls authentic direct developer job postings from official Lever Public APIs.
-        Returns 100% direct application URLs ending in /apply.
+        Fetches verified jobs from AshbyHQ public posting API, respecting isListed & isRemote flags,
+        and pulls real per-job applicationForm fields via Ashby GraphQL.
         """
-        drives = []
-        slugs = company_slugs or ["spotify", "coursera", "palantir"]
+        drives: List[Dict[str, Any]] = []
+        slugs = company_slugs or ["supabase", "posthog", "linear", "notion", "zapier", "replit"]
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                all_hits: List[Dict[str, Any]] = []
+                for slug in slugs:
+                    url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+                    try:
+                        res = await client.get(url)
+                        if res.status_code != 200:
+                            continue
+                        jobs = res.json().get("jobs", [])
+                        comp_name = slug.capitalize()
+                        per_comp = 0
+                        for j in jobs:
+                            if j.get("isListed") is False:
+                                continue
+                            title = j.get("title", "")
+                            if not is_engineering_role(title):
+                                continue
+                            app_url = j.get("applyUrl") or j.get("jobUrl") or ""
+                            if not app_url:
+                                continue
+                            loc = j.get("location") or ("Remote" if j.get("isRemote") else "Global")
+                            desc = j.get("descriptionPlain") or j.get("descriptionHtml") or ""
+                            region = classify_region_scope(loc, desc)
+                            if j.get("isRemote") and region == "GLOBAL":
+                                # Check if remote is explicitly locked to US/EMEA; otherwise mark REMOTE
+                                loc_l = loc.lower()
+                                if loc_l.strip() in {"remote", "anywhere"} or not any(
+                                    x in loc_l for x in ["us", "usa", "united states", "amer", "emea", "uk", "canada", "europe"]
+                                ):
+                                    region = "REMOTE"
+
+                            cand = self._build_candidate(
+                                company_name=comp_name,
+                                role_title=title,
+                                location=loc,
+                                job_description=desc,
+                                application_url=app_url,
+                                source_platform="ASHBY",
+                                salary_package="18.0 LPA - 36.0 LPA",
+                                company_website=f"https://www.{slug}.com",
+                                force_region=region,
+                            )
+                            all_hits.append(cand)
+                            per_comp += 1
+                            if per_comp >= 3:
+                                break
+                    except Exception as e:
+                        logger.warning(f"Ashby fetch failed for {slug}: {e}")
+
+                priority = {"INDIA": 0, "REMOTE": 1, "GLOBAL": 2}
+                all_hits.sort(key=lambda c: priority.get(c["region_scope"], 3))
+                drives = all_hits[:limit]
+
+                async def _enrich_ashby(c: Dict[str, Any]) -> None:
+                    schema = await extract_ats_form_schema(c["application_url"], c["company_name"], client=client)
+                    if schema.get("fields"):
+                        c["expected_fields"] = json.dumps(schema["fields"])
+                        c["schema_source"] = schema.get("schema_source")
+
+                await asyncio.gather(*[_enrich_ashby(c) for c in drives[:6]], return_exceptions=True)
+        except Exception as e:
+            logger.warning(f"Error in fetch_from_ashby: {e}")
+        return drives
+
+    async def fetch_from_smartrecruiters(self, limit: int = 12, company_slugs: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Fetches India-targeted engineering roles directly from SmartRecruiters public API (?country=in),
+        and pulls exact applyUrl + real job description & qualifications per requisition.
+        """
+        drives: List[Dict[str, Any]] = []
+        slugs = company_slugs or ["BoschGroup", "ServiceNow", "Experian", "WesternDigital"]
+        display_names = {
+            "BoschGroup": "Bosch Global Software Technologies (SR)",
+            "ServiceNow": "ServiceNow India",
+            "Experian": "Experian India",
+            "WesternDigital": "Western Digital India",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                for slug in slugs:
+                    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?country=in&limit=15"
+                    try:
+                        res = await client.get(url)
+                        if res.status_code != 200:
+                            continue
+                        postings = res.json().get("content", [])
+                        per_comp = 0
+                        for p in postings:
+                            title = p.get("name", "")
+                            if not is_engineering_role(title):
+                                continue
+                            pid = p.get("id")
+                            detail_r = await client.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}")
+                            if detail_r.status_code != 200:
+                                continue
+                            detail = detail_r.json()
+                            if detail.get("active") is False:
+                                continue
+                            app_url = detail.get("applyUrl") or detail.get("postingUrl")
+                            if not app_url:
+                                continue
+                            sections = (detail.get("jobAd") or {}).get("sections") or {}
+                            desc_html = (sections.get("jobDescription") or {}).get("text", "")
+                            qual_html = (sections.get("qualifications") or {}).get("text", "")
+                            loc_obj = p.get("location") or {}
+                            city = (loc_obj.get("city") or "").strip().title()
+                            loc = f"{city}, India" if city else "India"
+                            drives.append(
+                                self._build_candidate(
+                                    company_name=display_names.get(slug, slug),
+                                    role_title=title,
+                                    location=loc,
+                                    job_description=f"{desc_html}\n\nQualifications:\n{qual_html}",
+                                    application_url=app_url,
+                                    source_platform="SMARTRECRUITERS",
+                                    salary_package="9.0 LPA - 20.0 LPA",
+                                    force_region="INDIA",
+                                )
+                            )
+                            per_comp += 1
+                            if per_comp >= 3 or len(drives) >= limit:
+                                break
+                    except Exception as e:
+                        logger.warning(f"SmartRecruiters fetch failed for {slug}: {e}")
+                    if len(drives) >= limit:
+                        break
+        except Exception as e:
+            logger.warning(f"Error in fetch_from_smartrecruiters: {e}")
+        return drives
+
+    async def fetch_from_simplify_github(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Pulls active, direct-apply engineering roles from SimplifyJobs GitHub JSON feeds
+        (New-Grad-Positions & Summer2027-Internships), tagging India/Remote vs Global accurately.
+        """
+        drives: List[Dict[str, Any]] = []
+        feeds = [
+            ("New Grad", "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"),
+            ("Internship", "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json"),
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+                india_remote_hits: List[Dict[str, Any]] = []
+                global_hits: List[Dict[str, Any]] = []
+                for feed_type, raw_url in feeds:
+                    try:
+                        res = await client.get(raw_url)
+                        if res.status_code != 200:
+                            continue
+                        listings = res.json()
+                        # Process newest entries first using date_updated / date_posted
+                        active_items = [
+                            x for x in listings
+                            if x.get("active") is True and x.get("is_visible", True) is True
+                        ]
+                        active_items.sort(key=lambda x: x.get("date_updated") or x.get("date_posted") or 0, reverse=True)
+
+                        for x in active_items:
+                            title = x.get("title") or ""
+                            if not is_engineering_role(title):
+                                continue
+                            app_url = x.get("url") or ""
+                            if not is_valid_direct_url(app_url):
+                                continue
+                            locs = x.get("locations") or ["Global"]
+                            loc_str = ", ".join(locs[:3])
+                            comp = x.get("company_name") or "Global Tech"
+                            category = x.get("category") or "Software Engineering"
+                            degrees = ", ".join(x.get("degrees") or ["Bachelor's"])
+                            sponsorship = x.get("sponsorship") or "Check Portal"
+                            desc = (
+                                f"{feed_type} role ({category}) sourced from SimplifyJobs verified tracker. "
+                                f"Locations: {loc_str}. Degrees: {degrees}. Sponsorship: {sponsorship}."
+                            )
+                            cand = self._build_candidate(
+                                company_name=comp,
+                                role_title=title,
+                                location=loc_str,
+                                job_description=desc,
+                                application_url=app_url,
+                                source_platform="SIMPLIFY_GITHUB",
+                                salary_package="18.0 LPA - 40.0 LPA" if feed_type == "New Grad" else "Intern Stipend / Competitive",
+                                company_website=x.get("company_url"),
+                            )
+                            if cand["region_scope"] in {"INDIA", "REMOTE"}:
+                                if len(india_remote_hits) < limit // 2:
+                                    india_remote_hits.append(cand)
+                            elif len(global_hits) < limit // 2:
+                                global_hits.append(cand)
+
+                            if len(india_remote_hits) >= limit // 2 and len(global_hits) >= limit // 2:
+                                break
+                    except Exception as e:
+                        logger.warning(f"SimplifyJobs {feed_type} fetch failed: {e}")
+
+                drives = (india_remote_hits + global_hits)[:limit]
+        except Exception as e:
+            logger.warning(f"Error in fetch_from_simplify_github: {e}")
+        return drives
+
+    async def fetch_from_lever(self, limit: int = 8, company_slugs: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Pulls live developer postings from official Lever Public APIs with real descriptions & /apply URLs."""
+        drives: List[Dict[str, Any]] = []
+        slugs = company_slugs or ["spotify", "palantir"]
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 for slug in slugs:
                     url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
                     try:
                         res = await client.get(url)
-                        if res.status_code == 200:
-                            jobs = res.json()
-                            comp_name = slug.replace("-", " ").capitalize()
-                            for j in jobs:
-                                title = j.get("text", "")
-                                if not is_engineering_role(title):
-                                    continue
-                                app_url = j.get("applyUrl") or j.get("hostedUrl", "")
-                                loc = "Pan India / Hybrid"
-                                if j.get("categories") and isinstance(j.get("categories"), dict):
-                                    loc = j["categories"].get("location", loc)
-
-                                drives.append({
-                                    "company_name": comp_name,
-                                    "role_title": title,
-                                    "location": loc,
-                                    "salary_package": "14.0 LPA - 24.0 LPA",
-                                    "min_cgpa": 7.0,
-                                    "max_arrears": 0,
-                                    "allowed_departments": "CSE,IT,ECE",
-                                    "job_description": f"Direct engineering opening at {comp_name}. Ingested via official Lever ATS API.",
-                                    "days_ahead": 12,
-                                    "application_url": app_url,
-                                    "company_website": f"https://www.{slug}.com",
-                                    "selection_rounds": "Round 1: Online Technical Assessment -> Round 2: Algorithmic Coding -> Round 3: Culture & Values",
-                                    "form_type": "DIRECT_FORM",
-                                    "verification_status": "VERIFIED_ACTIVE",
-                                    "expected_fields": '["Full Name", "Email", "Phone", "Resume PDF", "LinkedIn Profile", "GitHub URL"]'
-                                })
-                                if len(drives) >= limit:
-                                    break
+                        if res.status_code != 200:
+                            continue
+                        jobs = res.json()
+                        comp_name = slug.replace("-", " ").capitalize()
+                        for j in jobs:
+                            title = j.get("text", "")
+                            if not is_engineering_role(title):
+                                continue
+                            app_url = j.get("applyUrl") or j.get("hostedUrl", "")
+                            if not is_valid_direct_url(app_url):
+                                continue
+                            loc = (j.get("categories") or {}).get("location") or "Remote / Global"
+                            desc = j.get("descriptionPlain") or j.get("description") or ""
+                            drives.append(
+                                self._build_candidate(
+                                    company_name=comp_name,
+                                    role_title=title,
+                                    location=loc,
+                                    job_description=desc,
+                                    application_url=app_url,
+                                    source_platform="LEVER",
+                                    salary_package="14.0 LPA - 26.0 LPA",
+                                    company_website=f"https://www.{slug}.com",
+                                )
+                            )
+                            if len(drives) >= limit:
+                                break
                     except Exception as e:
-                        logger.warning(f"Failed Lever fetch for {slug}: {e}")
+                        logger.warning(f"Lever fetch failed for {slug}: {e}")
                     if len(drives) >= limit:
                         break
         except Exception as e:
@@ -1032,17 +1303,14 @@ class JobFetcherWorker:
 
     async def fetch_from_jobspy(
         self,
-        limit: int = 10,
+        limit: int = 6,
         sites: Optional[List[str]] = None,
         search_term: str = "Software Engineer",
         location: str = "India"
     ) -> List[Dict[str, Any]]:
-        """
-        Fetch live postings from LinkedIn and Naukri using JobSpy library.
-        Runs in background worker thread to ensure the async event loop is never blocked.
-        """
-        drives = []
-        target_sites = sites if sites else ["linkedin", "naukri"]
+        """Fetch live postings from LinkedIn/Naukri using JobSpy if installed, retaining ONLY direct application URLs."""
+        drives: List[Dict[str, Any]] = []
+        target_sites = sites if sites else ["naukri", "linkedin"]
         try:
             def _run_scrape():
                 from jobspy import scrape_jobs
@@ -1057,18 +1325,16 @@ class JobFetcherWorker:
             df = await asyncio.to_thread(_run_scrape)
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
-                    title = str(row.get("title") or "Software Engineer")
+                    title = str(row.get("title") or "")
                     if not is_engineering_role(title):
                         continue
-                    company = str(row.get("company") or "Technology Enterprise")
-                    raw_desc = str(row.get("description") or f"Engineering position at {company}")
-                    clean_desc = clean_job_description(raw_desc)
-                    site_source = str(row.get("site") or "linkedin").capitalize()
-                    url = str(row.get("job_url_direct") or row.get("job_url") or "")
-                    clean_app_url = resolve_direct_application_url(company, title, url)
-                    clean_website = resolve_company_website(company, str(row.get("company_url") or ""))
-                    
-                    # Format salary package if available
+                    company = str(row.get("company") or "").strip()
+                    if not company:
+                        continue
+                    raw_desc = str(row.get("description") or "")
+                    direct_url = str(row.get("job_url_direct") or "")
+                    if not is_valid_direct_url(direct_url):
+                        continue  # Avoid saving unverified aggregator links or synthetic search links
                     min_amt = row.get("min_amount")
                     max_amt = row.get("max_amount")
                     currency = row.get("currency") or "INR"
@@ -1076,143 +1342,229 @@ class JobFetcherWorker:
                         salary = f"{min_amt:,.0f} - {max_amt:,.0f} {currency}"
                     else:
                         salary = "9.5 LPA - 16.0 LPA"
-
-                    drives.append({
-                        "company_name": company,
-                        "role_title": title,
-                        "location": str(row.get("location") or "Pan India / Hybrid"),
-                        "salary_package": salary,
-                        "min_cgpa": 6.8,
-                        "max_arrears": 0,
-                        "allowed_departments": "CSE,IT,ECE",
-                        "job_description": clean_desc,
-                        "days_ahead": 14,
-                        "application_url": clean_app_url,
-                        "company_website": clean_website,
-                        "selection_rounds": f"Round 1: Online Technical Assessment -> Round 2: Algorithmic & Problem Solving ({site_source}) -> Round 3: Culture & Managerial Evaluation"
-                    })
+                    drives.append(
+                        self._build_candidate(
+                            company_name=company,
+                            role_title=title,
+                            location=str(row.get("location") or "India"),
+                            job_description=raw_desc,
+                            application_url=direct_url,
+                            source_platform="JOBSPY",
+                            salary_package=salary,
+                            company_website=str(row.get("company_url") or ""),
+                        )
+                    )
                     if len(drives) >= limit:
                         break
         except Exception as e:
-            logger.warning(f"JobSpy ({target_sites}) scrape failed: {e}")
+            logger.debug(f"JobSpy ({target_sites}) skipped/failed: {e}")
         return drives
+
+    async def _verify_candidate_cached(
+        self, candidate: Dict[str, Any], client: httpx.AsyncClient, sem: asyncio.Semaphore
+    ) -> Optional[Dict[str, Any]]:
+        """Verifies URL reachability & expiry with 1-hour cache and bounded concurrency."""
+        url = candidate.get("application_url") or ""
+        if not is_valid_direct_url(url):
+            return None
+
+        now = datetime.now(timezone.utc)
+        cached = self._verify_cache.get(url)
+        if cached and (now - cached[0]).total_seconds() < 3600:
+            ver = cached[1]
+        else:
+            async with sem:
+                ver = await verify_application_link_and_expiry(
+                    url=url,
+                    company_name=candidate.get("company_name", ""),
+                    deadline=candidate.get("deadline_dt"),
+                    client=client,
+                )
+            self._verify_cache[url] = (now, ver)
+
+        if not ver.get("is_active"):
+            return None
+
+        candidate["verification_status"] = ver["verification_status"]
+        candidate["form_type"] = ver["form_type"]
+        candidate["verified_at"] = now
+        return candidate
 
     async def run_ingestion(self, college_id: str = "col-anna-001", location_filter: Optional[str] = None) -> Dict[str, Any]:
         """
-        Main Ingestion Routine.
-        Combines external feeds (Arbeitnow, Jobicy, Remotive, LinkedIn/Naukri via JobSpy) + verified tracks, deduplicates, and saves to database.
-        Supports location-targeted filtering (e.g. Kolkata, Chennai, Coimbatore, Bangalore).
+        Main Verified Ingestion Routine.
+        Combines Greenhouse (?content=true & ?questions=true), Ashby, SmartRecruiters (India),
+        SimplifyJobs GitHub feeds, Lever, curated Indian campus tracks, and verified aggregators.
+        Verifies live URL status & deadlines, removes synthetic cloning & duplicates, and scores accuracy.
         """
         now = datetime.now(timezone.utc)
         candidates: List[Dict[str, Any]] = []
 
-        # 1. Pull from verified campus hiring tracks
-        candidates.extend(VERIFIED_CAMPUS_DRIVES)
+        # 1. Verified regional & Indian campus tracks
+        for item in VERIFIED_CAMPUS_DRIVES:
+            candidates.append(
+                self._build_candidate(
+                    company_name=item["company_name"],
+                    role_title=item["role_title"],
+                    location=item.get("location", "Pan India"),
+                    job_description=item["job_description"],
+                    application_url=item.get("application_url") or resolve_direct_application_url(item["company_name"], item["role_title"]),
+                    source_platform="CAMPUS_CURATED",
+                    salary_package=item.get("salary_package", "8.0 LPA - 12.0 LPA"),
+                    min_cgpa=float(item.get("min_cgpa", 6.5)),
+                    max_arrears=int(item.get("max_arrears", 0)),
+                    allowed_departments=item.get("allowed_departments", "CSE,IT,ECE"),
+                    days_ahead=int(item.get("days_ahead", 7)),
+                    company_website=item.get("company_website"),
+                    selection_rounds=item.get("selection_rounds"),
+                    force_region="INDIA",
+                )
+            )
 
-        # 2. Pull live web feeds across multiple free APIs in parallel
+        # 2. Fetch live verified ATS & GitHub feeds concurrently
         results = await asyncio.gather(
-            self.fetch_from_greenhouse(limit=10),
-            self.fetch_from_lever(limit=10),
-            self.fetch_from_arbeitnow(limit=15),
-            self.fetch_from_jobicy(limit=10),
-            self.fetch_from_remotive(limit=10),
-            self.fetch_from_jobspy(limit=10, search_term="Software Engineer", location=location_filter or "India"),
-            return_exceptions=True
+            self.fetch_from_greenhouse(limit=16),
+            self.fetch_from_ashby(limit=12),
+            self.fetch_from_smartrecruiters(limit=12),
+            self.fetch_from_simplify_github(limit=20),
+            self.fetch_from_lever(limit=6),
+            self.fetch_from_arbeitnow(limit=6),
+            self.fetch_from_jobicy(limit=6),
+            self.fetch_from_remotive(limit=6),
+            self.fetch_from_jobspy(limit=5, search_term="Software Engineer", location=location_filter or "India"),
+            return_exceptions=True,
         )
         live_greenhouse = results[0] if isinstance(results[0], list) else []
-        live_lever = results[1] if isinstance(results[1], list) else []
-        live_arbeitnow = results[2] if isinstance(results[2], list) else []
-        live_jobicy = results[3] if isinstance(results[3], list) else []
-        live_remotive = results[4] if isinstance(results[4], list) else []
-        live_jobspy = results[5] if isinstance(results[5], list) else []
+        live_ashby = results[1] if isinstance(results[1], list) else []
+        live_smartrecruiters = results[2] if isinstance(results[2], list) else []
+        live_simplify = results[3] if isinstance(results[3], list) else []
+        live_lever = results[4] if isinstance(results[4], list) else []
+        live_arbeitnow = results[5] if isinstance(results[5], list) else []
+        live_jobicy = results[6] if isinstance(results[6], list) else []
+        live_remotive = results[7] if isinstance(results[7], list) else []
+        live_jobspy = results[8] if isinstance(results[8], list) else []
 
         candidates.extend(live_greenhouse)
+        candidates.extend(live_ashby)
+        candidates.extend(live_smartrecruiters)
+        candidates.extend(live_simplify)
         candidates.extend(live_lever)
         candidates.extend(live_arbeitnow)
         candidates.extend(live_jobicy)
         candidates.extend(live_remotive)
         candidates.extend(live_jobspy)
 
-        # If location filter specified, prioritize candidates matching the location
+        # Filter to true location matches if location_filter provided (NO synthetic cloning)
         is_filtered = bool(location_filter and location_filter.strip() and location_filter.lower() != "all")
         if is_filtered:
             loc_key = location_filter.strip().lower()
-            filtered_candidates = [
-                c for c in candidates 
+            candidates = [
+                c for c in candidates
                 if loc_key in c.get("location", "").lower() or loc_key in c.get("job_description", "").lower()
             ]
-            if filtered_candidates:
-                candidates = filtered_candidates
 
-        added_companies = []
-        updated_companies = []
+        # 3. In-batch deduplication + HTTP liveness & expiry verification
+        deduped_candidates: List[Dict[str, Any]] = []
+        seen_batch_keys = set()
+        seen_batch_urls = set()
+        for c in candidates:
+            bkey = (c["company_name"].lower(), c["role_title"].lower(), c["location"].lower())
+            burl = c["application_url"].lower().rstrip("/")
+            if bkey in seen_batch_keys or burl in seen_batch_urls:
+                continue
+            seen_batch_keys.add(bkey)
+            seen_batch_urls.add(burl)
+            deduped_candidates.append(c)
+
+        sem = asyncio.Semaphore(10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers=headers) as verify_client:
+            verified_raw = await asyncio.gather(
+                *[self._verify_candidate_cached(c, verify_client, sem) for c in deduped_candidates],
+                return_exceptions=True,
+            )
+        verified_candidates = [v for v in verified_raw if isinstance(v, dict)]
+
+        added_companies: List[str] = []
+        updated_companies: List[str] = []
         with Session(engine) as session:
-            for item in candidates:
-                company = item["company_name"].strip()
-                role = item["role_title"].strip()
+            for item in verified_candidates:
+                company = item["company_name"]
+                role = item["role_title"]
+                app_url = item["application_url"]
 
-                # Deduplicate: check if this company and role already exist for this college
                 existing = session.exec(
                     select(PlacementDrive).where(
                         PlacementDrive.college_id == college_id,
-                        PlacementDrive.company_name == company,
-                        PlacementDrive.role_title == role
+                        (
+                            ((PlacementDrive.company_name == company) & (PlacementDrive.role_title == role))
+                            | (PlacementDrive.application_url == app_url)
+                        ),
                     )
                 ).first()
 
-                if not existing:
-                    days_ahead = item.get("days_ahead", 7)
-                    drive_date = now + timedelta(days=days_ahead)
-                    deadline = drive_date - timedelta(days=2)
+                deadline = item.get("deadline_dt") or (now + timedelta(days=max(2, item.get("days_ahead", 9) - 2)))
+                drive_date = item.get("deadline_dt") or (now + timedelta(days=item.get("days_ahead", 9)))
 
+                acc_score, acc_breakdown = compute_job_accuracy_score(
+                    source_platform=item.get("source_platform", "CAMPUS_CURATED"),
+                    application_url=app_url,
+                    form_type=item.get("form_type"),
+                    verification_status=item.get("verification_status"),
+                    schema_source=item.get("schema_source"),
+                    job_description=item.get("job_description"),
+                    registration_deadline=deadline,
+                )
+
+                if not existing:
                     new_drive = PlacementDrive(
                         college_id=college_id,
                         company_name=company,
                         role_title=role,
-                        job_description=clean_job_description(item["job_description"]),
-                        location=item.get("location", "Pan India"),
-                        salary_package=item.get("salary_package", "8.0 LPA - 12.0 LPA"),
-                        min_cgpa=float(item.get("min_cgpa", 6.5)),
-                        max_arrears=int(item.get("max_arrears", 0)),
-                        allowed_departments=item.get("allowed_departments", "CSE,IT,ECE"),
+                        job_description=item["job_description"],
+                        location=item["location"],
+                        salary_package=item["salary_package"],
+                        min_cgpa=item["min_cgpa"],
+                        max_arrears=item["max_arrears"],
+                        allowed_departments=item["allowed_departments"],
                         drive_date=drive_date,
                         registration_deadline=deadline,
                         status=DriveStatus.ACTIVE,
-                        application_url=item.get("application_url"),
-                        company_website=item.get("company_website"),
-                        selection_rounds=item.get("selection_rounds"),
+                        application_url=app_url,
+                        company_website=item["company_website"],
+                        selection_rounds=item["selection_rounds"],
                         form_type=item.get("form_type", "DIRECT_FORM"),
                         verification_status=item.get("verification_status", "VERIFIED_ACTIVE"),
-                        expected_fields=item.get("expected_fields")
+                        expected_fields=item.get("expected_fields"),
+                        source_platform=item.get("source_platform", "CAMPUS_CURATED"),
+                        region_scope=item.get("region_scope", "INDIA"),
+                        accuracy_score=acc_score,
+                        accuracy_breakdown=acc_breakdown,
+                        verified_at=item.get("verified_at", now),
                     )
                     session.add(new_drive)
                     session.commit()
                     session.refresh(new_drive)
                     added_companies.append(company)
                 else:
-                    # Enrich existing drives with latest deadlines, URLs or rounds
                     updated = False
-                    if not existing.application_url and item.get("application_url"):
-                        existing.application_url = item.get("application_url")
+                    if item.get("job_description") and len(item["job_description"]) > len(existing.job_description or ""):
+                        existing.job_description = item["job_description"]
                         updated = True
-                    if not existing.company_website and item.get("company_website"):
-                        existing.company_website = item.get("company_website")
+                    if item.get("expected_fields") and (
+                        not existing.expected_fields or "College / Degree" in existing.expected_fields
+                    ):
+                        existing.expected_fields = item["expected_fields"]
                         updated = True
-                    if not existing.selection_rounds and item.get("selection_rounds"):
-                        existing.selection_rounds = item.get("selection_rounds")
+                    if existing.accuracy_score != acc_score or existing.verification_status != item.get("verification_status"):
+                        existing.accuracy_score = acc_score
+                        existing.accuracy_breakdown = acc_breakdown
+                        existing.verification_status = item.get("verification_status", "VERIFIED_ACTIVE")
+                        existing.source_platform = item.get("source_platform", existing.source_platform)
+                        existing.region_scope = item.get("region_scope", existing.region_scope)
+                        existing.verified_at = now
                         updated = True
-                    if not getattr(existing, 'form_type', None) and item.get("form_type"):
-                        existing.form_type = item.get("form_type")
-                        updated = True
-                    if not getattr(existing, 'verification_status', None) and item.get("verification_status"):
-                        existing.verification_status = item.get("verification_status")
-                        updated = True
-                    if not getattr(existing, 'expected_fields', None) and item.get("expected_fields"):
-                        existing.expected_fields = item.get("expected_fields")
-                        updated = True
-                    
-                    # Ensure deadline is in the future
-                    if existing.drive_date and existing.drive_date <= now:
+                    if existing.drive_date and existing.drive_date <= now and not item.get("deadline_dt"):
                         days_ahead = item.get("days_ahead", 7)
                         existing.drive_date = now + timedelta(days=days_ahead)
                         existing.registration_deadline = existing.drive_date - timedelta(days=2)
@@ -1224,50 +1576,10 @@ class JobFetcherWorker:
                         session.commit()
                         updated_companies.append(company)
 
-            # If location-specific fetch discovered 0 new items because static tracks already exist,
-            # pull fresh live developer opportunities and localize them for candidates in this district!
-            if is_filtered and len(added_companies) == 0:
-                loc_clean = location_filter.strip()
-                for live_item in (live_remotive + live_arbeitnow + live_jobicy + live_jobspy):
-                    live_comp = live_item["company_name"].strip()
-                    live_role = f"{live_item['role_title'].strip()} ({loc_clean} Tech Track)"
-                    exists = session.exec(
-                        select(PlacementDrive).where(
-                            PlacementDrive.college_id == college_id,
-                            PlacementDrive.company_name == live_comp,
-                            PlacementDrive.role_title == live_role
-                        )
-                    ).first()
-                    if not exists:
-                        days_ahead = live_item.get("days_ahead", 9)
-                        drive_date = now + timedelta(days=days_ahead)
-                        deadline = drive_date - timedelta(days=2)
-                        new_drive = PlacementDrive(
-                            college_id=college_id,
-                            company_name=live_comp,
-                            role_title=live_role,
-                            job_description=clean_job_description(live_item["job_description"]),
-                            location=f"{loc_clean} / Remote / Hybrid",
-                            salary_package=live_item.get("salary_package", "10.0 LPA - 16.5 LPA"),
-                            min_cgpa=float(live_item.get("min_cgpa", 6.5)),
-                            max_arrears=0,
-                            allowed_departments="CSE,IT,ECE",
-                            drive_date=drive_date,
-                            registration_deadline=deadline,
-                            status=DriveStatus.ACTIVE,
-                            application_url=live_item.get("application_url"),
-                            company_website=live_item.get("company_website"),
-                            selection_rounds=live_item.get("selection_rounds")
-                        )
-                        session.add(new_drive)
-                        session.commit()
-                        session.refresh(new_drive)
-                        added_companies.append(live_comp)
-                        if len(added_companies) >= 3:
-                            break
-
-            # Count total active drives matching
-            count_query = select(func.count(PlacementDrive.id)).where(PlacementDrive.college_id == college_id)
+            count_query = select(func.count(PlacementDrive.id)).where(
+                PlacementDrive.college_id == college_id,
+                PlacementDrive.verification_status != "EXPIRED",
+            )
             if is_filtered:
                 count_query = count_query.where(func.lower(PlacementDrive.location).like(f"%{location_filter.strip().lower()}%"))
             total_matching = session.exec(count_query).one()
@@ -1276,11 +1588,12 @@ class JobFetcherWorker:
         self.last_sync_count = len(added_companies)
 
         if added_companies:
-            logger.info(f"Ingestion added {len(added_companies)} new drives: {', '.join(added_companies)}")
+            logger.info(f"Verified ingestion added {len(added_companies)} drives: {', '.join(added_companies[:6])}")
 
         return {
             "status": "success",
-            "total_candidates_evaluated": len(candidates),
+            "total_candidates_evaluated": len(deduped_candidates),
+            "verified_candidates": len(verified_candidates),
             "new_drives_added": len(added_companies),
             "drives_updated": len(updated_companies),
             "total_active_drives": total_matching,
@@ -1288,12 +1601,17 @@ class JobFetcherWorker:
             "location_filtered": location_filter or "All",
             "source_breakdown": {
                 "verified_tracks": len(VERIFIED_CAMPUS_DRIVES),
+                "greenhouse_live": len(live_greenhouse),
+                "ashby_live": len(live_ashby),
+                "smartrecruiters_live": len(live_smartrecruiters),
+                "simplify_github_live": len(live_simplify),
+                "lever_live": len(live_lever),
                 "arbeitnow_live": len(live_arbeitnow),
                 "jobicy_live": len(live_jobicy),
                 "remotive_live": len(live_remotive),
-                "jobspy_linkedin_naukri_live": len(live_jobspy)
+                "jobspy_linkedin_naukri_live": len(live_jobspy),
             },
-            "timestamp": now.isoformat()
+            "timestamp": now.isoformat(),
         }
 
 job_fetcher = JobFetcherWorker()

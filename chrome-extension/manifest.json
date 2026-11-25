@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "SkillBridge AI Form Auto-Fill Companion",
+  "version": "1.0.0",
+  "description": "Accurately auto-fills external ATS job application forms (Greenhouse, Ashby, Lever, SmartRecruiters, Workday, Corporate Portals) from your verified SkillBridge profile with mandatory user review before submission.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://localhost:3000/*",
+    "http://127.0.0.1:8000/*",
+    "http://127.0.0.1:3000/*",
+    "https://boards.greenhouse.io/*",
+    "https://job-boards.greenhouse.io/*",
+    "https://job-boards.eu.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://jobs.ashbyhq.com/*",
+    "https://jobs.smartrecruiters.com/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://nextstep.tcs.com/*",
+    "https://*.zohocorp.com/*",
+    "https://*.amazon.jobs/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SkillBridge Auto-Fill"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:3000/*",
+        "http://127.0.0.1:3000/*"
+      ],
+      "js": ["bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://boards.greenhouse.io/*",
+        "https://job-boards.greenhouse.io/*",
+        "https://job-boards.eu.greenhouse.io/*",
+        "https://jobs.lever.co/*",
+        "https://jobs.ashbyhq.com/*",
+        "https://jobs.smartrecruiters.com/*",
+        "https://*.myworkdayjobs.com/*",
+        "https://nextstep.tcs.com/*",
+        "https://*.zohocorp.com/*",
+        "https://*.amazon.jobs/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
+

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkillBridge Auto-Fill</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="header">
+    <h1>
+      <span>SkillBridge Auto-Fill</span>
+      <span id="platform-badge" class="badge">Ready</span>
+    </h1>
+    <div id="student-line" style="font-size:11px;color:#c7d2fe;margin-top:4px;">Checking profile sync...</div>
+  </div>
+
+  <div class="container">
+    <div id="auth-box" class="card" style="display:none;">
+      <div class="card-title">Connect SkillBridge Account</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <input id="login-email" class="field-input" type="email" placeholder="student@ceg.edu" value="student@ceg.edu" />
+        <input id="login-pass" class="field-input" type="password" placeholder="Password" />
+        <button id="login-btn" class="btn btn-primary">Sign In & Sync Profile</button>
+      </div>
+    </div>
+
+    <div id="review-card" class="card" style="display:none;">
+      <div class="card-title" style="display:flex;justify-content:space-between;">
+        <span>Pre-Fill Review (<span id="job-name">Profile Ready</span>)</span>
+        <button id="refresh-btn" class="btn-secondary" style="width:auto;padding:2px 6px;">↻ Refresh</button>
+      </div>
+      <div id="fields-container" class="field-list"></div>
+    </div>
+
+    <div class="notice">
+      <strong>User Review Protected:</strong> Extension fills form inputs and pauses — always review Resume PDF, dropdowns &amp; answers before clicking Submit yourself.
+    </div>
+
+    <button id="autofill-btn" class="btn btn-primary">⚡ Auto-Fill Form on This Tab</button>
+    <div id="status-msg" style="display:none;"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+

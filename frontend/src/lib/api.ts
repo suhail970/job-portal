@@ -77,9 +77,19 @@ export const api = {
   getMe: () => request("/auth/me"),
 
   // Drives
-  getDrives: (location?: string) =>
-    request(location && location !== "All" ? `/drives?location=${encodeURIComponent(location)}` : "/drives"),
+  getDrives: (location?: string, region: string = "india_remote") => {
+    const params = new URLSearchParams();
+    params.set("region", region || "india_remote");
+    if (location && location !== "All") params.set("location", location);
+    return request(`/drives?${params.toString()}`);
+  },
+  getDriveRegionCounts: () => request("/drives/region-counts"),
   getDrive: (id: string) => request(`/drives/${id}`),
+  getDriveFormSchema: (id: string, refresh: boolean = false) =>
+    request(`/drives/${id}/form-schema${refresh ? "?refresh=true" : ""}`),
+  verifyDrive: (id: string) =>
+    request(`/drives/${id}/verify`, { method: "POST" }),
+  getExtensionDownloadUrl: () => `${API_BASE}/drives/extension/download`,
   fetchLatestDrives: (location?: string) =>
     request(location && location !== "All" ? `/drives/fetch-latest?location=${encodeURIComponent(location)}` : "/drives/fetch-latest", {
       method: "POST",

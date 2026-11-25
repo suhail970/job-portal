@@ -85,8 +85,13 @@ class PlacementDrive(SQLModel, table=True):
     company_website: Optional[str] = Field(default=None) # Official company website
     selection_rounds: Optional[str] = Field(default=None) # e.g. "Online Assessment -> Tech Interview -> HR"
     form_type: Optional[str] = Field(default="DIRECT_FORM") # "DIRECT_FORM" | "CORPORATE_PORTAL" | "CAMPUS_DRIVE"
-    verification_status: Optional[str] = Field(default="VERIFIED_ACTIVE") # "VERIFIED_ACTIVE" | "PENDING_VERIFICATION"
-    expected_fields: Optional[str] = Field(default=None) # JSON list or description of required fields
+    verification_status: Optional[str] = Field(default="VERIFIED_ACTIVE") # "VERIFIED_ACTIVE" | "PENDING_VERIFICATION" | "EXPIRED" | "UNVERIFIED"
+    expected_fields: Optional[str] = Field(default=None) # JSON schema/list of required ATS fields & questions
+    source_platform: Optional[str] = Field(default="CAMPUS_CURATED") # GREENHOUSE | ASHBY | SMARTRECRUITERS | LEVER | SIMPLIFY_GITHUB | CAMPUS_CURATED
+    region_scope: Optional[str] = Field(default="INDIA", index=True) # INDIA | REMOTE | GLOBAL
+    accuracy_score: int = Field(default=75) # 0-100 computed verification score
+    accuracy_breakdown: Optional[str] = Field(default=None) # JSON rubric breakdown
+    verified_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # -------------------------------------------------------------

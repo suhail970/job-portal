@@ -127,9 +127,16 @@ export default function StudentPortalPage() {
   const [loadingAudit, setLoadingAudit] = useState(false);
   const [triggeringJobId, setTriggeringJobId] = useState<string | null>(null);
 
-  // Location Hub Filter State
+  // Region & Location Hub Filter State
+  const [selectedRegion, setSelectedRegion] = useState<"india_remote" | "india" | "remote" | "global">("india_remote");
+  const [regionCounts, setRegionCounts] = useState<any>({ india_remote: 0, india: 0, remote: 0, global: 0, all: 0 });
   const [selectedLocation, setSelectedLocation] = useState("All");
   const [filterNewOnly, setFilterNewOnly] = useState(false);
+  const [driveFormSchema, setDriveFormSchema] = useState<any | null>(null);
+  const [loadingFormSchema, setLoadingFormSchema] = useState(false);
+  const [verifyingDrive, setVerifyingDrive] = useState(false);
+  const [syncedExt, setSyncedExt] = useState(false);
+  const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [seenDriveIds, setSeenDriveIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -192,31 +199,70 @@ export default function StudentPortalPage() {
   const [applyFeedback, setApplyFeedback] = useState<any>(null);
   const [copiedAutofill, setCopiedAutofill] = useState(false);
 
+  const buildStudentSummary = () => ({
+    full_name: profile?.full_name || "Aravind Swaminathan",
+    email: profile?.email || "student@ceg.edu",
+    phone: applyPhone || profile?.profile?.phone_number || "+91 98765 43210",
+    roll_number: profile?.profile?.roll_number || "2022CSE042",
+    cgpa: profile?.profile?.cgpa ?? 8.65,
+    graduation_year: profile?.profile?.graduation_year || 2026,
+    department_name: profile?.department_name || "Computer Science and Engineering (CSE)",
+    college: "Anna University - CEG Campus",
+    linkedin_url: applyLinkedin || profile?.profile?.linkedin_url || "",
+    github_url: applyGithub || profile?.profile?.github_url || "",
+  });
+
+  const handleSyncToExtension = (schemaOverride?: any) => {
+    const schemaObj = schemaOverride || driveFormSchema;
+    const studentSummary = schemaObj?.student_summary || buildStudentSummary();
+    if (typeof window !== "undefined") {
+      window.postMessage(
+        {
+          type: "SKILLBRIDGE_EXT_SYNC",
+          payload: {
+            token: getToken() || "",
+            api_base: "http://localhost:8000/api/v1",
+            student_summary: studentSummary,
+            drive_schema: schemaObj || null,
+          },
+        },
+        "*"
+      );
+      setSyncedExt(true);
+      setTimeout(() => setSyncedExt(false), 3000);
+    }
+  };
+
   const handleCopyAutofillKit = () => {
     if (!selectedDriveForModal) return;
-    const name = profile?.name || "Student Candidate";
-    const email = profile?.email || "student@ceg.edu";
-    const phone = applyPhone || "+91 98765 43210";
-    const dept = profile?.department?.name || "Computer Science & Engineering";
-    const cgpa = profile?.cgpa || 8.4;
-    const college = "Anna University - CEG Campus";
+    const s = buildStudentSummary();
     const comp = selectedDriveForModal.company_name;
     const role = selectedDriveForModal.role_title;
-    const note = applyCoverNote || `I am excited to apply for the ${role} position at ${comp}. With a strong foundation in Data Structures, Algorithms, and scalable software systems from ${college}, I am eager to contribute to your engineering team.`;
+    const note = applyCoverNote || `I am excited to apply for the ${role} position at ${comp}. With a strong foundation in Data Structures, Algorithms, and scalable software systems from ${s.college}, I am eager to contribute to your engineering team.`;
+
+    let atsFieldsText = "";
+    if (driveFormSchema?.fields?.length) {
+      atsFieldsText =
+        "\n--- Live Extracted ATS Fields ---\n" +
+        driveFormSchema.fields
+          .map((f: any) => `${f.label}${f.required ? " *" : ""}: ${f.suggested_value || (f.type === "file" ? "[Attach Resume PDF]" : "[Review Manually]")}`)
+          .join("\n");
+    }
 
     const kitText = `=== CANDIDATE AUTO-FILL APPLICATION KIT ===
-Full Name: ${name}
-Email Address: ${email}
-Mobile / WhatsApp: ${phone}
-College / University: ${college}
-Department / Major: ${dept}
-Current CGPA: ${cgpa}
-Graduation Year: 2026
-LinkedIn Profile: ${applyLinkedin}
-GitHub / Portfolio: ${applyGithub}
+Full Name: ${s.full_name}
+Email Address: ${s.email}
+Mobile / WhatsApp: ${s.phone}
+Roll / Reg No: ${s.roll_number}
+College / University: ${s.college}
+Department / Major: ${s.department_name}
+Current CGPA: ${s.cgpa}
+Graduation Year: ${s.graduation_year}
+LinkedIn Profile: ${s.linkedin_url}
+GitHub / Portfolio: ${s.github_url}
 Role Applied For: ${role} at ${comp}
 Statement of Interest:
-${note}
+${note}${atsFieldsText}
 ==========================================`;
 
     navigator.clipboard.writeText(kitText);
@@ -341,8 +387,12 @@ ${note}
         if (savedAi.api_key) setAiApiKey(savedAi.api_key);
       }
 
-      const drivesData = await api.getDrives();
+      const [drivesData, countsData] = await Promise.all([
+        api.getDrives(selectedLocation, selectedRegion),
+        api.getDriveRegionCounts().catch(() => null),
+      ]);
       setDrives(drivesData);
+      if (countsData) setRegionCounts(countsData);
 
       try {
         const statusData = await api.getCronStatus();
@@ -370,10 +420,22 @@ ${note}
   // -------------------------------------------------------------
   // Drive Application & Location Filtering
   // -------------------------------------------------------------
+  const handleSelectRegion = async (reg: "india_remote" | "india" | "remote" | "global") => {
+    setSelectedRegion(reg);
+    const nextLoc = reg === "global" || reg === "remote" ? "All" : selectedLocation;
+    if (nextLoc !== selectedLocation) setSelectedLocation("All");
+    try {
+      const filtered = await api.getDrives(nextLoc, reg);
+      setDrives(filtered);
+    } catch (e: any) {
+      console.error("Region filter error:", e);
+    }
+  };
+
   const handleSelectLocation = async (loc: string) => {
     setSelectedLocation(loc);
     try {
-      const filtered = await api.getDrives(loc);
+      const filtered = await api.getDrives(loc, selectedRegion);
       setDrives(filtered);
     } catch (e: any) {
       console.error("Location filter error:", e);
@@ -386,8 +448,12 @@ ${note}
     const locToFetch = targetCity || selectedLocation;
     try {
       const res = await api.fetchLatestDrives(locToFetch !== "All" ? locToFetch : undefined);
-      const updatedDrives = await api.getDrives(locToFetch !== "All" ? locToFetch : undefined);
+      const [updatedDrives, countsData] = await Promise.all([
+        api.getDrives(locToFetch !== "All" ? locToFetch : undefined, selectedRegion),
+        api.getDriveRegionCounts().catch(() => null),
+      ]);
       setDrives(updatedDrives);
+      if (countsData) setRegionCounts(countsData);
       try {
         const statusData = await api.getCronStatus();
         setSyncStatus(statusData);
@@ -396,12 +462,13 @@ ${note}
         }
       } catch {}
       const addedCount = res.new_drives_added || 0;
+      const verifiedCnt = res.verified_candidates ?? res.total_candidates_evaluated ?? 0;
       const totalCount = updatedDrives.length;
-      const locLabel = locToFetch === "All" ? "all tech hubs" : locToFetch;
+      const locLabel = locToFetch === "All" ? "India & Global ATS hubs" : locToFetch;
       if (addedCount > 0) {
-        setSyncMsg(`⚡ Successfully fetched & added ${addedCount} brand new drives for ${locLabel} (${res.companies_added?.slice(0, 4).join(", ")}${res.companies_added?.length > 4 ? "..." : ""})! Displaying ${totalCount} active openings.`);
+        setSyncMsg(`⚡ Verified & added ${addedCount} direct drives (${res.companies_added?.slice(0, 4).join(", ")}${res.companies_added?.length > 4 ? "..." : ""}) from Greenhouse, Ashby, SmartRecruiters & SimplifyJobs! Showing ${totalCount} in active view.`);
       } else {
-        setSyncMsg(`✓ Live Feeds Refreshed! Evaluated ${res.total_candidates_evaluated || 30} opportunities across Arbeitnow, Jobicy, Remotive & Campus tracks for ${locLabel}. All ${totalCount} drives are completely verified & up-to-date.`);
+        setSyncMsg(`✓ Verified ${verifiedCnt} live ATS opportunities (Greenhouse, Ashby, SmartRecruiters, SimplifyJobs & Campus tracks) for ${locLabel}. Displaying ${totalCount} active openings.`);
       }
     } catch (e: any) {
       setSyncMsg(`⚠️ Fetch failed: ${e.message}`);
@@ -442,8 +509,12 @@ ${note}
       if (selectedJobForAudit && selectedJobForAudit.id === jobId) {
         await fetchJobHistory(jobId);
       }
-      const updatedDrives = await api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined);
+      const [updatedDrives, countsData] = await Promise.all([
+        api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined, selectedRegion),
+        api.getDriveRegionCounts().catch(() => null),
+      ]);
       setDrives(updatedDrives);
+      if (countsData) setRegionCounts(countsData);
     } catch (err: any) {
       setSyncMsg(`❌ Run failed: ${err.message}`);
     } finally {
@@ -474,6 +545,56 @@ ${note}
     }
   };
 
+  const loadLiveFormSchema = async (driveId: string, forceRefresh = false) => {
+    setLoadingFormSchema(true);
+    try {
+      const schemaRes = await api.getDriveFormSchema(driveId, forceRefresh);
+      setDriveFormSchema(schemaRes);
+      handleSyncToExtension(schemaRes);
+      if (schemaRes?.accuracy_score !== undefined) {
+        setSelectedDriveForModal((prev: any) =>
+          prev && prev.id === driveId
+            ? {
+                ...prev,
+                accuracy_score: schemaRes.accuracy_score,
+                accuracy_breakdown: schemaRes.accuracy_breakdown ? JSON.stringify(schemaRes.accuracy_breakdown) : prev.accuracy_breakdown,
+              }
+            : prev
+        );
+      }
+    } catch (e) {
+      console.error("Form schema load notice:", e);
+    } finally {
+      setLoadingFormSchema(false);
+    }
+  };
+
+  const handleVerifyDriveLive = async (driveId: string) => {
+    setVerifyingDrive(true);
+    try {
+      const vRes = await api.verifyDrive(driveId);
+      setSelectedDriveForModal((prev: any) =>
+        prev && prev.id === driveId
+          ? {
+              ...prev,
+              accuracy_score: vRes.accuracy_score,
+              accuracy_breakdown: JSON.stringify(vRes.accuracy_breakdown),
+              verification_status: vRes.verification?.verification_status || prev.verification_status,
+              form_type: vRes.verification?.form_type || prev.form_type,
+              verified_at: vRes.verified_at,
+            }
+          : prev
+      );
+      await loadLiveFormSchema(driveId, true);
+      const updated = await api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined, selectedRegion);
+      setDrives(updated);
+    } catch (e: any) {
+      console.error("Live verification failed:", e);
+    } finally {
+      setVerifyingDrive(false);
+    }
+  };
+
   const openDriveModal = (drive: any, mode: "details" | "apply" = "details") => {
     if (drive?.id) {
       markDriveAsSeen(drive.id);
@@ -481,11 +602,15 @@ ${note}
     setSelectedDriveForModal(drive);
     setModalMode(mode);
     setApplyFeedback(null);
+    setDriveFormSchema(null);
     setApplyCoverNote(`I am excited to apply for the ${drive.role_title} role at ${drive.company_name}. With my strong background in computer science, system architectures, and problem solving, I am eager to contribute effectively.`);
     if (profile?.profile) {
       if (profile.profile.phone_number) setApplyPhone(profile.profile.phone_number);
       if (profile.profile.github_url) setApplyGithub(profile.profile.github_url);
       if (profile.profile.linkedin_url) setApplyLinkedin(profile.profile.linkedin_url);
+    }
+    if (drive?.id) {
+      loadLiveFormSchema(drive.id);
     }
   };
 
@@ -506,7 +631,7 @@ ${note}
         linkedin_url: applyLinkedin
       });
       setApplyFeedback(res);
-      const updatedDrives = await api.getDrives();
+      const updatedDrives = await api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined, selectedRegion);
       setDrives(updatedDrives);
       setSelectedDriveForModal((prev: any) => ({
         ...prev,
@@ -1017,8 +1142,67 @@ ${note}
             )}
           </div>
 
-          {/* District & Location Quick-Filter Bar */}
+          {/* Region Scope Filter Bar (India & Remote default vs Separate Global Filter) */}
           <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => handleSelectRegion("india_remote")}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                    selectedRegion === "india_remote"
+                      ? "bg-indigo-600 text-white shadow-sm shadow-indigo-200"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  }`}
+                >
+                  <span>🇮🇳 India & 🌐 Remote ({regionCounts.india_remote || drives.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectRegion("india")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    selectedRegion === "india"
+                      ? "bg-indigo-600 text-white shadow-sm"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  }`}
+                >
+                  <span>🇮🇳 India Only ({regionCounts.india ?? 0})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectRegion("remote")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    selectedRegion === "remote"
+                      ? "bg-indigo-600 text-white shadow-sm"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  }`}
+                >
+                  <span>🌐 Remote ({regionCounts.remote ?? 0})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectRegion("global")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    selectedRegion === "global"
+                      ? "bg-slate-900 text-white shadow-sm"
+                      : "bg-violet-50 hover:bg-violet-100 text-violet-800 border border-violet-200"
+                  }`}
+                >
+                  <span>🌍 Global Jobs ({regionCounts.global ?? 0})</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <a
+                  href={api.getExtensionDownloadUrl()}
+                  download="skillbridge-autofill-extension.zip"
+                  className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold inline-flex items-center gap-1.5 transition whitespace-nowrap"
+                  title="Download Manifest V3 Chrome Extension to auto-fill Greenhouse, Lever, Ashby & Workday forms"
+                >
+                  <span>🧩 Chrome Auto-Fill Extension (.zip)</span>
+                </a>
+              </div>
+            </div>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <MapPin className="w-4 h-4 text-indigo-600" />
@@ -1151,6 +1335,19 @@ ${note}
                       <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
                         {d.salary_package}
                       </span>
+                      <span
+                        className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                          (d.accuracy_score ?? 85) >= 85
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : (d.accuracy_score ?? 85) >= 70
+                            ? "bg-sky-50 text-sky-700 border-sky-200"
+                            : "bg-amber-50 text-amber-700 border-amber-200"
+                        }`}
+                        title="Verified Accuracy Score based on ATS trust, direct link, liveness & schema extraction"
+                      >
+                        <ShieldCheck className="w-3 h-3" />
+                        <span>{d.accuracy_score ?? 85}% Match/Acc</span>
+                      </span>
                       {isUnseenNew && (
                         <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wide bg-gradient-to-r from-amber-500 to-orange-500 text-white px-2 py-0.5 rounded-full shadow-2xs animate-pulse">
                           <Sparkles className="w-2.5 h-2.5" />
@@ -1174,10 +1371,22 @@ ${note}
                       )}
                     </div>
                     <p className="text-xs font-semibold text-indigo-600">{d.role_title}</p>
-                    <p className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
-                      <MapPin className="w-3 h-3 text-slate-400" />
-                      <span>{d.location || "Pan India / Hybrid"}</span>
-                    </p>
+                    <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                      <p className="text-[11px] text-slate-500 flex items-center gap-1">
+                        <MapPin className="w-3 h-3 text-slate-400" />
+                        <span>{d.location || "Pan India / Hybrid"}</span>
+                      </p>
+                      {d.region_scope && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                          {d.region_scope === "INDIA" ? "🇮🇳 India" : d.region_scope === "REMOTE" ? "🌐 Remote" : "🌍 Global"}
+                        </span>
+                      )}
+                      {d.source_platform && (
+                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 border border-violet-100">
+                          {d.source_platform.replace("_", " ")}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <p className="text-xs text-slate-600 line-clamp-3 leading-relaxed">
@@ -2333,6 +2542,61 @@ ${note}
             <div className="p-6 overflow-y-auto space-y-5 text-slate-800">
               {modalMode === "details" ? (
                 <>
+                  {/* Job Accuracy & Verification Score Card */}
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <ShieldCheck className={`w-4 h-4 ${(selectedDriveForModal.accuracy_score ?? 85) >= 85 ? "text-emerald-600" : "text-indigo-600"}`} />
+                        <span className="text-xs font-bold text-slate-900">
+                          Job Accuracy Score: {selectedDriveForModal.accuracy_score ?? 85}/100
+                        </span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                          {selectedDriveForModal.verification_status || "VERIFIED_ACTIVE"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleVerifyDriveLive(selectedDriveForModal.id)}
+                        disabled={verifyingDrive}
+                        className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${verifyingDrive ? "animate-spin" : ""}`} />
+                        <span>{verifyingDrive ? "Verifying..." : "Verify Link Live"}</span>
+                      </button>
+                    </div>
+                    {selectedDriveForModal.accuracy_breakdown && (() => {
+                      try {
+                        const b = typeof selectedDriveForModal.accuracy_breakdown === "string"
+                          ? JSON.parse(selectedDriveForModal.accuracy_breakdown)
+                          : selectedDriveForModal.accuracy_breakdown;
+                        return (
+                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 text-[10px]">
+                            <div className="p-1.5 rounded-lg bg-white border border-slate-200">
+                              <span className="text-slate-400 block">Source Trust</span>
+                              <strong className="text-slate-800">{b.source_trust?.score}/{b.source_trust?.max} ({b.source_trust?.platform})</strong>
+                            </div>
+                            <div className="p-1.5 rounded-lg bg-white border border-slate-200">
+                              <span className="text-slate-400 block">Direct URL</span>
+                              <strong className="text-slate-800">{b.direct_url?.score}/{b.direct_url?.max}</strong>
+                            </div>
+                            <div className="p-1.5 rounded-lg bg-white border border-slate-200">
+                              <span className="text-slate-400 block">HTTP & Expiry</span>
+                              <strong className="text-slate-800">{b.liveness?.score}/{b.liveness?.max}</strong>
+                            </div>
+                            <div className="p-1.5 rounded-lg bg-white border border-slate-200">
+                              <span className="text-slate-400 block">ATS Questions</span>
+                              <strong className="text-slate-800">{b.form_schema?.score}/{b.form_schema?.max}</strong>
+                            </div>
+                            <div className="p-1.5 rounded-lg bg-white border border-slate-200">
+                              <span className="text-slate-400 block">JD & Deadline</span>
+                              <strong className="text-slate-800">{b.details_freshness?.score}/{b.details_freshness?.max}</strong>
+                            </div>
+                          </div>
+                        );
+                      } catch { return null; }
+                    })()}
+                  </div>
+
                   {/* Official Registration / External Form Link Banner */}
                   {selectedDriveForModal.application_url && (
                     <div className="p-4 rounded-2xl bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2651,62 +2915,115 @@ ${note}
                     <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">Attached</span>
                   </div>
 
-                  {/* Form Field Preview Checklist */}
-                  {selectedDriveForModal.expected_fields && (
-                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1.5">
+                  {/* Live Extracted ATS Questions & Auto-Fill Field Mapping */}
+                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
                       <span className="font-bold text-slate-800 flex items-center gap-1.5">
                         <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600" />
-                        <span>What This Recruiter Asks For:</span>
+                        <span>Live Extracted ATS Form Questions</span>
+                        {driveFormSchema?.schema_source && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                            {driveFormSchema.schema_source.replace(/_/g, " ")}
+                          </span>
+                        )}
                       </span>
-                      <div className="flex flex-wrap gap-1.5 pt-0.5">
-                        {(() => {
-                          try {
-                            const fields = JSON.parse(selectedDriveForModal.expected_fields);
-                            return Array.isArray(fields)
-                              ? fields.map((f: string, idx: number) => (
-                                  <span key={idx} className="bg-white border border-slate-200 text-slate-700 px-2 py-0.5 rounded-md text-[11px] font-medium shadow-2xs">
-                                    {f}
-                                  </span>
-                                ))
-                              : null;
-                          } catch {
-                            return <span className="text-[11px] text-slate-500">{selectedDriveForModal.expected_fields}</span>;
-                          }
-                        })()}
+                      {loadingFormSchema && (
+                        <span className="text-[11px] text-indigo-600 flex items-center gap-1">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          <span>Fetching live questions...</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {driveFormSchema?.fields?.length ? (
+                      <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                        {driveFormSchema.fields.map((fld: any, idx: number) => {
+                          const fKey = `${idx}-${fld.name || fld.label}`;
+                          return (
+                            <div key={fKey} className="bg-white border border-slate-200 rounded-lg p-2 flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-semibold text-slate-800 truncate">{fld.label || fld.name}</span>
+                                  {fld.required && <span className="text-[10px] font-bold text-rose-600">*Required</span>}
+                                  {fld.needs_review && (
+                                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                                      Review Manually
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-slate-500 truncate font-mono mt-0.5">
+                                  {fld.suggested_value ? fld.suggested_value : (fld.type === "file" ? "📎 Upload PDF file in browser" : "Select option on external portal")}
+                                </p>
+                              </div>
+                              {fld.suggested_value && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(String(fld.suggested_value));
+                                    setCopiedFieldKey(fKey);
+                                    setTimeout(() => setCopiedFieldKey(null), 1500);
+                                  }}
+                                  className="px-2 py-1 rounded bg-slate-100 hover:bg-indigo-100 text-slate-700 hover:text-indigo-800 text-[10px] font-bold shrink-0 cursor-pointer"
+                                >
+                                  {copiedFieldKey === fKey ? "Copied ✓" : "Copy"}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-[11px] text-slate-500">Standard recruiter application fields (Name, Email, Phone, Resume PDF).</span>
+                    )}
+                  </div>
+
+                  {/* Chrome Extension Sync + 1-Click Copy Kit */}
+                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 text-xs space-y-2.5">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="space-y-0.5">
+                        <span className="font-bold text-indigo-950 flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Chrome Extension Auto-Fill &amp; 1-Click Copy Kit</span>
+                        </span>
+                        <span className="text-[11px] text-indigo-700 block">
+                          Auto-fill this external form directly using our Manifest V3 Extension (pauses for your review before Submit) or copy all answers:
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleSyncToExtension()}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow-xs cursor-pointer ${
+                            syncedExt
+                              ? "bg-emerald-600 text-white"
+                              : "bg-slate-900 hover:bg-slate-800 text-white"
+                          }`}
+                        >
+                          <span>{syncedExt ? "✓ Synced to Extension!" : "🧩 Sync Extension"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCopyAutofillKit}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow-xs cursor-pointer ${
+                            copiedAutofill
+                              ? "bg-emerald-600 text-white"
+                              : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                          }`}
+                        >
+                          {copiedAutofill ? (
+                            <>
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Copied! ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>Copy Kit</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                     </div>
-                  )}
-
-                  {/* 1-Click Profile Auto-Fill Kit Banner */}
-                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 text-xs flex items-center justify-between gap-3">
-                    <div className="space-y-0.5">
-                      <span className="font-bold text-indigo-950 flex items-center gap-1.5">
-                        <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                        <span>1-Click Profile Auto-Fill Kit</span>
-                      </span>
-                      <span className="text-[11px] text-indigo-700">Copy your formatted academic details & tailored cover note to paste on external form:</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleCopyAutofillKit}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition shadow-xs cursor-pointer ${
-                        copiedAutofill
-                          ? "bg-emerald-600 text-white"
-                          : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                      }`}
-                    >
-                      {copiedAutofill ? (
-                        <>
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Copied! ✓</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy Kit</span>
-                        </>
-                      )}
-                    </button>
                   </div>
 
                   {/* External Company Form Link Reminder */}

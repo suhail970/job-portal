@@ -35,6 +35,16 @@ def init_db():
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN verification_status VARCHAR DEFAULT 'VERIFIED_ACTIVE'"))
                 if "expected_fields" not in col_names:
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN expected_fields TEXT"))
+                if "source_platform" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN source_platform VARCHAR DEFAULT 'CAMPUS_CURATED'"))
+                if "region_scope" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN region_scope VARCHAR DEFAULT 'INDIA'"))
+                if "accuracy_score" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN accuracy_score INTEGER DEFAULT 75"))
+                if "accuracy_breakdown" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN accuracy_breakdown TEXT"))
+                if "verified_at" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN verified_at DATETIME"))
                 conn.commit()
             except Exception as e:
                 print(f"Schema migration notice: {e}")
@@ -124,12 +134,65 @@ def init_db():
         except Exception as e:
             print(f"Notice during drive description sanitization: {e}")
 
-        # Auto-heal missing or generic application URLs and company websites
+        # Auto-heal, purge synthetic/non-tech/unverified listings, and compute verification accuracy scores
         try:
-            from app.workers.job_fetcher import resolve_direct_application_url, resolve_company_website
+            from app.models.entities import Application
+            from app.workers.job_fetcher import (
+                resolve_direct_application_url,
+                resolve_company_website,
+                is_engineering_role,
+            )
+            from app.workers.ats_verifier import (
+                classify_region_scope,
+                detect_source_platform,
+                is_valid_direct_url,
+                compute_job_accuracy_score,
+            )
+
+            applied_drive_ids = {
+                a.drive_id for a in session.exec(select(Application)).all()
+            }
             all_drives = session.exec(select(PlacementDrive)).all()
-            healed_any = False
+            seen_keys = set()
+            seen_urls = set()
+            mutated = False
+            now_utc = datetime.now(timezone.utc)
+
             for d in all_drives:
+                title_lower = (d.role_title or "").lower()
+                url_lower = (d.application_url or "").lower()
+
+                is_synthetic_clone = "tech track)" in title_lower
+                is_non_tech = not is_engineering_role(d.role_title or "")
+                is_aggregator_trap = any(
+                    bad in url_lower for bad in ["remotive.com", "jobicy.com", "arbeitnow.com", "google.com/search"]
+                )
+
+                # Purge synthetic clones, non-engineering spam, and unverified aggregator links (unless a student applied)
+                if d.id not in applied_drive_ids and (is_synthetic_clone or is_non_tech or is_aggregator_trap):
+                    session.delete(d)
+                    mutated = True
+                    continue
+
+                # Deduplicate identical company+role or non-curated duplicate URLs
+                norm_key = (
+                    (d.company_name or "").strip().lower(),
+                    (d.role_title or "").strip().lower(),
+                    (d.location or "").strip().lower(),
+                )
+                norm_url = (d.application_url or "").strip().lower().rstrip("/")
+                is_dup_key = norm_key in seen_keys
+                is_dup_aggregator_url = bool(norm_url) and norm_url in seen_urls and (
+                    "remotive" in norm_url or "jobicy" in norm_url or "arbeitnow" in norm_url
+                )
+                if d.id not in applied_drive_ids and (is_dup_key or is_dup_aggregator_url):
+                    session.delete(d)
+                    mutated = True
+                    continue
+                seen_keys.add(norm_key)
+                if norm_url:
+                    seen_urls.add(norm_url)
+
                 changed = False
                 # 1. Heal null or generic application_url
                 if not d.application_url or d.application_url.rstrip('/') in [
@@ -140,16 +203,37 @@ def init_db():
                 ]:
                     d.application_url = resolve_direct_application_url(d.company_name, d.role_title, d.application_url)
                     changed = True
+
                 # 2. Heal null or aggregator company_website
                 if not d.company_website or any(agg in (d.company_website or '').lower() for agg in ["remotive.com", "jobicy.com", "arbeitnow.com"]):
                     d.company_website = resolve_company_website(d.company_name, d.company_website)
                     changed = True
-                # 3. Heal form_type, verification_status, and expected_fields
+
+                # 3. Classify region_scope & source_platform accurately
+                computed_region = classify_region_scope(d.location, d.job_description)
+                if d.region_scope != computed_region:
+                    d.region_scope = computed_region
+                    changed = True
+
+                computed_source = detect_source_platform(d.application_url, d.source_platform or "CAMPUS_CURATED")
+                if d.source_platform != computed_source:
+                    d.source_platform = computed_source
+                    changed = True
+
+                # 4. Expiry check against registration_deadline
+                if d.registration_deadline:
+                    dl = d.registration_deadline if d.registration_deadline.tzinfo else d.registration_deadline.replace(tzinfo=timezone.utc)
+                    if dl < now_utc and d.verification_status != "EXPIRED":
+                        d.verification_status = "EXPIRED"
+                        d.status = DriveStatus.COMPLETED
+                        changed = True
+
+                # 5. Heal form_type, verification_status, expected_fields, and accuracy_score
                 if not getattr(d, 'form_type', None):
-                    d.form_type = "DIRECT_FORM"
+                    d.form_type = "DIRECT_FORM" if is_valid_direct_url(d.application_url) else "CORPORATE_PORTAL"
                     changed = True
                 if not getattr(d, 'verification_status', None):
-                    d.verification_status = "VERIFIED_ACTIVE"
+                    d.verification_status = "VERIFIED_ACTIVE" if is_valid_direct_url(d.application_url) else "UNVERIFIED"
                     changed = True
                 if not getattr(d, 'expected_fields', None):
                     c_lower = (d.company_name or '').lower()
@@ -162,13 +246,31 @@ def init_db():
                     else:
                         d.expected_fields = '["Full Name", "Email", "Phone", "College / Degree", "Resume PDF", "LinkedIn Profile", "GitHub URL"]'
                     changed = True
+
+                score, breakdown_json = compute_job_accuracy_score(
+                    source_platform=d.source_platform or "CAMPUS_CURATED",
+                    application_url=d.application_url,
+                    form_type=d.form_type,
+                    verification_status=d.verification_status,
+                    schema_source=None,
+                    job_description=d.job_description,
+                    registration_deadline=d.registration_deadline,
+                )
+                if d.accuracy_score != score or not d.accuracy_breakdown:
+                    d.accuracy_score = score
+                    d.accuracy_breakdown = breakdown_json
+                    if not d.verified_at:
+                        d.verified_at = now_utc
+                    changed = True
+
                 if changed:
                     session.add(d)
-                    healed_any = True
-            if healed_any:
+                    mutated = True
+
+            if mutated:
                 session.commit()
         except Exception as e:
-            print(f"Notice during drive URL healing: {e}")
+            print(f"Notice during drive URL healing & cleanup: {e}")
 
         # Check if already seeded
         existing_admin = session.exec(select(User).where(User.email == "admin@skillbridge.ai")).first()
