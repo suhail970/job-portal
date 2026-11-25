@@ -1,5 +1,6 @@
 import re
 import json
+import difflib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,6 +49,7 @@ KNOWN_BOT_SHIELDED_DOMAINS = [
     "honeywell.com",
     "bosch-softwaretechnologies.com",
     "jobs.telusdigital.com",
+    "ust.com",
 ]
 
 INDIA_LOCATION_KEYWORDS = [
@@ -90,6 +92,101 @@ def classify_region_scope(location: Optional[str], description: Optional[str] = 
             return "REMOTE"
 
     return "GLOBAL"
+
+
+DISTRICT_ALIAS_GROUPS: Dict[str, List[str]] = {
+    "tenkasi": ["tenkasi", "tirunelveli", "thenkasi", "dhenkasi", "dhenkaasi", "thenkaasi", "mathalamparai"],
+    "tirunelveli": ["tirunelveli", "tenkasi", "nellai"],
+    "trichy": ["trichy", "tiruchirappalli", "tiruchirapalli", "trichinopoly"],
+    "coimbatore": ["coimbatore", "kovai", "coimbutore"],
+    "chennai": ["chennai", "madras"],
+    "madurai": ["madurai"],
+    "salem": ["salem"],
+    "bangalore": ["bangalore", "bengaluru", "blr"],
+    "hyderabad": ["hyderabad", "cyberabad"],
+    "pune": ["pune", "poona"],
+    "kolkata": ["kolkata", "calcutta"],
+    "mumbai": ["mumbai", "bombay"],
+    "gurgaon": ["gurgaon", "gurugram"],
+    "noida": ["noida"],
+    "kochi": ["kochi", "cochin", "ernakulam"],
+    "trivandrum": ["trivandrum", "thiruvananthapuram"],
+    "mysore": ["mysore", "mysuru"],
+    "bhubaneswar": ["bhubaneswar", "bhubaneshwar"],
+    "indore": ["indore"],
+    "visakhapatnam": ["visakhapatnam", "vizag", "vishakhapatnam"],
+    "ahmedabad": ["ahmedabad", "gandhinagar", "gift city"],
+    "thoothukudi": ["thoothukudi", "tuticorin"],
+    "puducherry": ["puducherry", "pondicherry", "pondy"],
+    "tiruppur": ["tiruppur", "tirupur", "coimbatore"],
+    "remote": ["remote", "pan india", "anywhere"],
+}
+
+
+def _phonetic_norm(value: str) -> str:
+    """Normalizes Tamil/Indian district romanizations (e.g. Dhenkaasi -> tenkasi)."""
+    s = re.sub(r"[^a-z]", "", (value or "").lower())
+    for src, dst in (
+        ("dh", "t"),
+        ("th", "t"),
+        ("bh", "b"),
+        ("gh", "g"),
+        ("kh", "k"),
+        ("ph", "f"),
+        ("aa", "a"),
+        ("ee", "i"),
+        ("oo", "u"),
+    ):
+        s = s.replace(src, dst)
+    return re.sub(r"(.)\1+", r"\1", s)
+
+
+_PHONETIC_TO_CANONICAL: Dict[str, str] = {}
+for _canon, _aliases in DISTRICT_ALIAS_GROUPS.items():
+    for _al in _aliases:
+        _PHONETIC_TO_CANONICAL.setdefault(_phonetic_norm(_al), _canon)
+
+
+def _match_canonical_district(query: Optional[str]) -> Optional[str]:
+    q = (query or "").strip().lower()
+    if not q or q == "all":
+        return None
+    for canon, aliases in DISTRICT_ALIAS_GROUPS.items():
+        if q == canon or q in aliases:
+            return canon
+    norm_q = _phonetic_norm(q)
+    if norm_q in _PHONETIC_TO_CANONICAL:
+        return _PHONETIC_TO_CANONICAL[norm_q]
+    close = difflib.get_close_matches(q, list(DISTRICT_ALIAS_GROUPS.keys()), n=1, cutoff=0.78)
+    if close:
+        return close[0]
+    close_norm = difflib.get_close_matches(norm_q, list(_PHONETIC_TO_CANONICAL.keys()), n=1, cutoff=0.82)
+    if close_norm:
+        return _PHONETIC_TO_CANONICAL[close_norm[0]]
+    return None
+
+
+def canonicalize_location_query(query: Optional[str]) -> str:
+    """Resolves phonetic/spelling variants (e.g. 'Dhenkaasi') to canonical city name ('Tenkasi')."""
+    raw = (query or "").strip()
+    if not raw or raw.lower() == "all":
+        return "All"
+    canon = _match_canonical_district(raw)
+    return canon.title() if canon else raw
+
+
+def expand_location_terms(query: Optional[str]) -> List[str]:
+    """Returns deduplicated lowercase search terms for district SQL & candidate matching."""
+    raw = (query or "").strip().lower()
+    if not raw or raw == "all":
+        return []
+    terms: List[str] = []
+    canon = _match_canonical_district(raw)
+    if canon:
+        terms.extend(DISTRICT_ALIAS_GROUPS.get(canon, [canon]))
+    if raw not in terms:
+        terms.append(raw)
+    return list(dict.fromkeys(terms))
 
 
 def detect_source_platform(url: Optional[str], fallback: str = "CAMPUS_CURATED") -> str:
@@ -240,7 +337,7 @@ async def extract_ats_form_schema(
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers)
+        client = httpx.AsyncClient(timeout=4.0, follow_redirects=True, headers=headers)
 
     result: Dict[str, Any] = {
         "platform": platform,
@@ -440,7 +537,7 @@ async def verify_application_link_and_expiry(
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers)
+        client = httpx.AsyncClient(timeout=4.0, follow_redirects=True, headers=headers)
 
     try:
         # Official JSON ATS active state verification first

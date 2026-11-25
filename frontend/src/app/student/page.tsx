@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api, getToken, getCustomAiConfig, setCustomAiConfig, CustomAiConfig } from "@/lib/api";
 import {
   Sparkles,
@@ -131,6 +131,8 @@ export default function StudentPortalPage() {
   const [selectedRegion, setSelectedRegion] = useState<"india_remote" | "india" | "remote" | "global">("india_remote");
   const [regionCounts, setRegionCounts] = useState<any>({ india_remote: 0, india: 0, remote: 0, global: 0, all: 0 });
   const [selectedLocation, setSelectedLocation] = useState("All");
+  const [fallbackDrives, setFallbackDrives] = useState<any[]>([]);
+  const locationSearchTimerRef = useRef<any>(null);
   const [filterNewOnly, setFilterNewOnly] = useState(false);
   const [driveFormSchema, setDriveFormSchema] = useState<any | null>(null);
   const [loadingFormSchema, setLoadingFormSchema] = useState(false);
@@ -420,6 +422,14 @@ ${note}${atsFieldsText}
   // -------------------------------------------------------------
   // Drive Application & Location Filtering
   // -------------------------------------------------------------
+  const fetchPanIndiaOpenFallback = async (reg: string) => {
+    const allOpen = await api.getDrives(undefined, reg).catch(() => []);
+    return allOpen.filter((d: any) => {
+      const locL = (d.location || "").toLowerCase();
+      return d.region_scope === "REMOTE" || locL.includes("pan india") || locL.includes("remote");
+    });
+  };
+
   const handleSelectRegion = async (reg: "india_remote" | "india" | "remote" | "global") => {
     setSelectedRegion(reg);
     const nextLoc = reg === "global" || reg === "remote" ? "All" : selectedLocation;
@@ -427,6 +437,11 @@ ${note}${atsFieldsText}
     try {
       const filtered = await api.getDrives(nextLoc, reg);
       setDrives(filtered);
+      if (nextLoc !== "All" && filtered.length === 0) {
+        setFallbackDrives(await fetchPanIndiaOpenFallback(reg));
+      } else {
+        setFallbackDrives([]);
+      }
     } catch (e: any) {
       console.error("Region filter error:", e);
     }
@@ -437,6 +452,11 @@ ${note}${atsFieldsText}
     try {
       const filtered = await api.getDrives(loc, selectedRegion);
       setDrives(filtered);
+      if (loc !== "All" && filtered.length === 0) {
+        setFallbackDrives(await fetchPanIndiaOpenFallback(selectedRegion));
+      } else {
+        setFallbackDrives([]);
+      }
     } catch (e: any) {
       console.error("Location filter error:", e);
     }
@@ -445,15 +465,30 @@ ${note}${atsFieldsText}
   const handleFetchLatestDrives = async (targetCity?: string) => {
     setFetchingDrives(true);
     setSyncMsg("");
-    const locToFetch = targetCity || selectedLocation;
+    const locToFetch = (targetCity || selectedLocation || "All").trim() || "All";
     try {
       const res = await api.fetchLatestDrives(locToFetch !== "All" ? locToFetch : undefined);
+      const effectiveLoc =
+        res.resolved_location && res.resolved_location !== "All" && locToFetch !== "All"
+          ? res.resolved_location
+          : locToFetch;
+      if (effectiveLoc !== selectedLocation && locToFetch !== "All") {
+        setSelectedLocation(effectiveLoc);
+      }
+
       const [updatedDrives, countsData] = await Promise.all([
-        api.getDrives(locToFetch !== "All" ? locToFetch : undefined, selectedRegion),
+        api.getDrives(effectiveLoc !== "All" ? effectiveLoc : undefined, selectedRegion),
         api.getDriveRegionCounts().catch(() => null),
       ]);
       setDrives(updatedDrives);
       if (countsData) setRegionCounts(countsData);
+
+      let fbList: any[] = [];
+      if (effectiveLoc !== "All" && updatedDrives.length === 0) {
+        fbList = await fetchPanIndiaOpenFallback(selectedRegion);
+      }
+      setFallbackDrives(fbList);
+
       try {
         const statusData = await api.getCronStatus();
         setSyncStatus(statusData);
@@ -464,11 +499,19 @@ ${note}${atsFieldsText}
       const addedCount = res.new_drives_added || 0;
       const verifiedCnt = res.verified_candidates ?? res.total_candidates_evaluated ?? 0;
       const totalCount = updatedDrives.length;
-      const locLabel = locToFetch === "All" ? "India & Global ATS hubs" : locToFetch;
-      if (addedCount > 0) {
-        setSyncMsg(`⚡ Verified & added ${addedCount} direct drives (${res.companies_added?.slice(0, 4).join(", ")}${res.companies_added?.length > 4 ? "..." : ""}) from Greenhouse, Ashby, SmartRecruiters & SimplifyJobs! Showing ${totalCount} in active view.`);
+      const aliasNote =
+        locToFetch !== "All" && effectiveLoc.toLowerCase() !== locToFetch.toLowerCase()
+          ? ` (matched "${locToFetch}" → "${effectiveLoc}")`
+          : "";
+      const locLabel = effectiveLoc === "All" ? "India & Global ATS hubs" : `${effectiveLoc}${aliasNote}`;
+      if (addedCount > 0 && totalCount > 0) {
+        setSyncMsg(`⚡ Verified & added ${addedCount} direct drives (${res.companies_added?.slice(0, 4).join(", ")}${res.companies_added?.length > 4 ? "..." : ""}) for ${locLabel}! Showing ${totalCount} in active view.`);
+      } else if (totalCount > 0) {
+        setSyncMsg(`✓ Verified ${verifiedCnt} live ATS opportunities for ${locLabel}. Displaying ${totalCount} active openings.`);
+      } else if (fbList.length > 0) {
+        setSyncMsg(`✓ Verified ${verifiedCnt} openings${aliasNote}: 0 direct local offices found inside ${effectiveLoc}, showing ${fbList.length} verified Pan-India & Remote roles eligible from ${effectiveLoc}.`);
       } else {
-        setSyncMsg(`✓ Verified ${verifiedCnt} live ATS opportunities (Greenhouse, Ashby, SmartRecruiters, SimplifyJobs & Campus tracks) for ${locLabel}. Displaying ${totalCount} active openings.`);
+        setSyncMsg(`✓ Verified ${verifiedCnt} live ATS opportunities for ${locLabel}.`);
       }
     } catch (e: any) {
       setSyncMsg(`⚠️ Fetch failed: ${e.message}`);
@@ -1048,6 +1091,11 @@ ${note}${atsFieldsText}
                         {hub.label}
                       </option>
                     ))}
+                    {selectedLocation && !DISTRICT_HUBS.some(h => h.value.toLowerCase() === selectedLocation.toLowerCase()) && (
+                      <option value={selectedLocation} className="bg-slate-900 text-white">
+                        📍 {selectedLocation}
+                      </option>
+                    )}
                   </select>
                 </div>
 
@@ -1211,23 +1259,52 @@ ${note}${atsFieldsText}
               </div>
 
               {/* District Search input */}
-              <div className="relative w-full sm:w-72">
-                <input
-                  type="text"
-                  placeholder="Search any district (e.g. Coimbatore, Madurai, Trichy)..."
-                  value={locationSearch}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setLocationSearch(val);
-                    if (val.trim().length >= 2) {
-                      handleSelectLocation(val.trim());
-                    } else if (val.trim().length === 0) {
-                      handleSelectLocation("All");
-                    }
-                  }}
-                  className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-slate-50"
-                />
-                <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+              <div className="flex items-center gap-1.5 w-full sm:w-80">
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    placeholder="Search any district (e.g. Tenkasi, Trichy, Coimbatore)..."
+                    value={locationSearch}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setLocationSearch(val);
+                      if (locationSearchTimerRef.current) {
+                        clearTimeout(locationSearchTimerRef.current);
+                      }
+                      locationSearchTimerRef.current = setTimeout(() => {
+                        const trimmed = val.trim();
+                        if (trimmed.length >= 2) {
+                          handleSelectLocation(trimmed);
+                        } else if (trimmed.length === 0) {
+                          handleSelectLocation("All");
+                        }
+                      }, 250);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        if (locationSearchTimerRef.current) clearTimeout(locationSearchTimerRef.current);
+                        handleFetchLatestDrives(locationSearch.trim() || "All");
+                      }
+                    }}
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-slate-50"
+                  />
+                  <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                </div>
+                {locationSearch.trim().length >= 2 && (
+                  <button
+                    type="button"
+                    disabled={fetchingDrives}
+                    onClick={() => {
+                      if (locationSearchTimerRef.current) clearTimeout(locationSearchTimerRef.current);
+                      handleFetchLatestDrives(locationSearch.trim());
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold whitespace-nowrap cursor-pointer"
+                    title="Fetch live openings for this district"
+                  >
+                    {fetchingDrives ? "..." : "Fetch"}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1295,7 +1372,39 @@ ${note}${atsFieldsText}
             <span className="text-xs text-slate-500 font-medium">Auto-matched with your CGPA & branch</span>
           </div>
 
-          {drives.length === 0 && (
+          {drives.length === 0 && selectedLocation !== "All" && fallbackDrives.length > 0 && (
+            <div className="bg-amber-50/80 rounded-2xl p-5 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <h3 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+                  <MapPin className="w-4 h-4 text-amber-600" />
+                  <span>0 direct local corporate offices listed in {selectedLocation}</span>
+                </h3>
+                <p className="text-xs text-slate-600">
+                  Showing <span className="font-bold text-indigo-700">{fallbackDrives.length} verified Pan-India &amp; 🌐 Remote opportunities</span> eligible for applicants from {selectedLocation}.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => handleFetchLatestDrives(selectedLocation)}
+                  disabled={fetchingDrives}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs transition cursor-pointer"
+                >
+                  {fetchingDrives ? "Fetching..." : `⚡ Re-Scan ${selectedLocation}`}
+                </button>
+                <button
+                  onClick={() => {
+                    setLocationSearch("");
+                    handleSelectLocation("All");
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
+                >
+                  🌐 Show All Hubs
+                </button>
+              </div>
+            </div>
+          )}
+
+          {drives.length === 0 && fallbackDrives.length === 0 && (
             <div className="bg-white rounded-2xl p-8 border border-slate-200 text-center space-y-3">
               <MapPin className="w-8 h-8 text-indigo-400 mx-auto" />
               <h3 className="font-bold text-slate-800 text-base">No active drives found for {selectedLocation}</h3>
@@ -1313,7 +1422,9 @@ ${note}${atsFieldsText}
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {drives.filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id))).map((d: any) => {
+            {(drives.length === 0 && selectedLocation !== "All" && fallbackDrives.length > 0 ? fallbackDrives : drives)
+              .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
+              .map((d: any) => {
               const isUnseenNew = d.is_new && !seenDriveIds.includes(d.id);
               return (
               <div

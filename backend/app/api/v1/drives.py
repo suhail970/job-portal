@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse
-from sqlmodel import Session, select, func
+from sqlmodel import Session, select, func, or_
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ from app.workers.ats_verifier import (
     verify_application_link_and_expiry,
     compute_job_accuracy_score,
     map_student_to_form_fields,
+    expand_location_terms,
 )
 import io
 import os
@@ -91,8 +92,8 @@ def list_drives(
         query = query.where(PlacementDrive.region_scope == "GLOBAL")
 
     if location and location.strip() and location.strip().lower() != "all":
-        loc_term = f"%{location.strip().lower()}%"
-        query = query.where(func.lower(PlacementDrive.location).like(loc_term))
+        loc_terms = expand_location_terms(location)
+        query = query.where(or_(*[func.lower(PlacementDrive.location).like(f"%{t}%") for t in loc_terms]))
         
     query = query.order_by(PlacementDrive.accuracy_score.desc(), PlacementDrive.drive_date.asc())
     drives = session.exec(query).all()

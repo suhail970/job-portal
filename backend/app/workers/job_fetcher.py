@@ -6,7 +6,7 @@ import html
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timezone, timedelta
-from sqlmodel import Session, select, func
+from sqlmodel import Session, select, func, or_
 from app.core.database import engine
 from app.models.entities import PlacementDrive
 from app.models.enums import DriveStatus
@@ -18,6 +18,8 @@ from app.workers.ats_verifier import (
     extract_ats_form_schema,
     verify_application_link_and_expiry,
     compute_job_accuracy_score,
+    canonicalize_location_query,
+    expand_location_terms,
 )
 
 logger = logging.getLogger("skillbridge.fetcher")
@@ -63,7 +65,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Digital supply chain systems, full-stack Java/Node.js, PostgreSQL, API management, business automation.",
         "days_ahead": 8,
-        "application_url": "https://www.itcinfotech.com/careers/",
+        "application_url": "https://www.itcinfotech.com/",
         "company_website": "https://www.itcinfotech.com",
         "selection_rounds": "Round 1: Aptitude & Programming Test -> Round 2: Technical Interview -> Round 3: HR Fitment"
     },
@@ -93,7 +95,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Data Structures, Algorithms, C/C++/Java, Object Oriented Design, building scalable enterprise SaaS products.",
         "days_ahead": 4,
-        "application_url": "https://www.zohocorp.com/careers/",
+        "application_url": "https://careers.zohocorp.com/jobs/Careers",
         "company_website": "https://www.zoho.com",
         "selection_rounds": "Round 1: General Aptitude & C/Java Output -> Round 2: Basic Programming (Arrays & Strings) -> Round 3: Advanced DSA -> Round 4: Tech & HR"
     },
@@ -151,7 +153,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE,EEE",
         "job_description": "Automotive software engineering, C/C++, Embedded Linux, AUTOSAR, IoT cloud edge computing, microcontrollers.",
         "days_ahead": 8,
-        "application_url": "https://www.bosch-softwaretechnologies.com/careers",
+        "application_url": "https://careers.smartrecruiters.com/BoschGroup?country=in",
         "company_website": "https://www.bosch.in",
         "selection_rounds": "Round 1: Bosch Online Assessment (C/C++ & Aptitude) -> Round 2: Technical Interview (Microcontrollers & OOPS) -> Round 3: Techno-Managerial Round -> Round 4: HR Discussion"
     },
@@ -249,7 +251,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Microservices digital commerce platform, Java Spring Boot, Node.js, React, Kubernetes, AWS distributed architectures.",
         "days_ahead": 9,
-        "application_url": "https://www.infosys.com/about/skava.html",
+        "application_url": "https://www.infosys.com/careers/",
         "company_website": "https://infosys.com",
         "selection_rounds": "Round 1: HackerRank Coding Assessment -> Round 2: Full-Stack Pair Programming -> Round 3: Tech Lead & HR"
     },
@@ -263,7 +265,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Connected industrial automation, IoT sensor telemetry, Python, embedded controller firmware, smart factory monitoring.",
         "days_ahead": 6,
-        "application_url": "https://www.roots.com/careers",
+        "application_url": "https://www.rootsindia.com/careers/",
         "company_website": "https://roots.com",
         "selection_rounds": "Round 1: Aptitude & Logic Assessment -> Round 2: Technical Interview -> Round 3: Managerial & HR"
     },
@@ -321,7 +323,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Engineering world-class SaaS products from rural India. C/C++, Java, distributed systems, clean algorithms.",
         "days_ahead": 9,
-        "application_url": "https://www.zohocorp.com/careers/",
+        "application_url": "https://careers.zohocorp.com/jobs/Careers",
         "company_website": "https://zoho.com",
         "selection_rounds": "Round 1: C/Java Output Prediction & Logic -> Round 2: Complex Algorithms & String Manipulation -> Round 3: System Design -> Round 4: Founder/HR Round"
     },
@@ -335,7 +337,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Low-code application development (Appian), business process automation, enterprise integrations, Java, SQL.",
         "days_ahead": 6,
-        "application_url": "https://www.vuram.com/careers/",
+        "application_url": "https://www.wns.com/careers",
         "company_website": "https://vuram.com",
         "selection_rounds": "Round 1: Analytical Reasoning & Logic Test -> Round 2: Technical Problem Solving -> Round 3: HR Fitment"
     },
@@ -365,7 +367,7 @@ VERIFIED_CAMPUS_DRIVES = [
         "allowed_departments": "CSE,IT,ECE",
         "job_description": "Digital engineering services, cloud application development, React, Node.js, Spring Boot, automated CI/CD.",
         "days_ahead": 9,
-        "application_url": "https://www.ust.com/careers",
+        "application_url": "https://www.ust.com/en/careers",
         "company_website": "https://ust.com",
         "selection_rounds": "Round 1: Online Coding & Aptitude Test -> Round 2: Technical Interview -> Round 3: HR Interview"
     },
@@ -903,39 +905,48 @@ class JobFetcherWorker:
         """
         drives: List[Dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
                 res = await client.get(api_url)
                 if res.status_code != 200:
                     return drives
                 items = res.json().get(items_key, [])
-                for item in items:
+                eng_items = [
+                    item for item in items
+                    if is_engineering_role(item.get(field_map["title"], ""))
+                    and item.get(field_map["company"], "")
+                    and (item.get(field_map["url"]) or "")
+                ][: max(limit * 3, 15)]
+
+                sem = asyncio.Semaphore(6)
+
+                async def _resolve_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     title = item.get(field_map["title"], "")
-                    if not is_engineering_role(title):
-                        continue
                     company = item.get(field_map["company"], "")
-                    if not company:
-                        continue
                     raw_url = item.get(field_map["url"]) or ""
-                    ats_url = await unshorten_to_direct_ats(raw_url, company, client=client, timeout_seconds=8.0)
+                    async with sem:
+                        ats_url = await unshorten_to_direct_ats(raw_url, company, client=client, timeout_seconds=3.5)
                     if not ats_url or not is_valid_direct_url(ats_url):
-                        continue  # Reject unverified aggregator pages / search fallbacks
+                        return None  # Reject unverified aggregator pages / search fallbacks
                     loc = item.get(field_map["location"]) or "Remote"
                     desc = item.get(field_map["desc"]) or ""
                     sal = item.get("salary") or default_salary
-                    drives.append(
-                        self._build_candidate(
-                            company_name=company,
-                            role_title=title,
-                            location=str(loc),
-                            job_description=desc,
-                            application_url=ats_url,
-                            source_platform=source_name,
-                            salary_package=str(sal),
-                            company_website=item.get("company_url"),
-                        )
+                    return self._build_candidate(
+                        company_name=company,
+                        role_title=title,
+                        location=str(loc),
+                        job_description=desc,
+                        application_url=ats_url,
+                        source_platform=source_name,
+                        salary_package=str(sal),
+                        company_website=item.get("company_url"),
                     )
-                    if len(drives) >= limit:
-                        break
+
+                resolved = await asyncio.gather(*[_resolve_item(it) for it in eng_items], return_exceptions=True)
+                for cand in resolved:
+                    if isinstance(cand, dict):
+                        drives.append(cand)
+                        if len(drives) >= limit:
+                            break
         except Exception as e:
             logger.warning(f"{source_name} fetch failed: {e}")
         return drives
@@ -989,17 +1000,19 @@ class JobFetcherWorker:
         }
         now = datetime.now(timezone.utc)
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                all_hits: List[Dict[str, Any]] = []
-                for slug in slugs:
+            async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                sem = asyncio.Semaphore(8)
+
+                async def _fetch_gh_board(slug: str) -> List[Dict[str, Any]]:
                     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+                    hits: List[Dict[str, Any]] = []
                     try:
-                        res = await client.get(url)
+                        async with sem:
+                            res = await client.get(url)
                         if res.status_code != 200:
-                            continue
+                            return hits
                         jobs = res.json().get("jobs", [])
                         comp_name = name_map.get(slug, slug.replace("-", " ").title())
-                        per_comp_count = 0
                         for j in jobs:
                             title = j.get("title", "")
                             if not is_engineering_role(title):
@@ -1013,23 +1026,29 @@ class JobFetcherWorker:
                             app_url = f"{raw_url}#app" if "#app" not in raw_url else raw_url
                             loc = (j.get("location") or {}).get("name") or "Remote"
                             desc = j.get("content") or f"Direct engineering role at {comp_name}."
-                            cand = self._build_candidate(
-                                company_name=comp_name,
-                                role_title=title,
-                                location=loc,
-                                job_description=desc,
-                                application_url=app_url,
-                                source_platform="GREENHOUSE",
-                                salary_package="18.0 LPA - 34.0 LPA",
-                                company_website=f"https://www.{slug}.com",
-                                deadline_dt=dl_dt,
+                            hits.append(
+                                self._build_candidate(
+                                    company_name=comp_name,
+                                    role_title=title,
+                                    location=loc,
+                                    job_description=desc,
+                                    application_url=app_url,
+                                    source_platform="GREENHOUSE",
+                                    salary_package="18.0 LPA - 34.0 LPA",
+                                    company_website=f"https://www.{slug}.com",
+                                    deadline_dt=dl_dt,
+                                )
                             )
-                            all_hits.append(cand)
-                            per_comp_count += 1
-                            if per_comp_count >= 4:
+                            if len(hits) >= 4:
                                 break
                     except Exception as e:
                         logger.warning(f"Greenhouse fetch failed for {slug}: {e}")
+                    return hits
+
+                board_results = await asyncio.gather(*[_fetch_gh_board(s) for s in slugs], return_exceptions=True)
+                all_hits: List[Dict[str, Any]] = [
+                    cand for res in board_results if isinstance(res, list) for cand in res
+                ]
 
                 # Sort India -> Remote -> Global so India & Remote always populate cleanly alongside Global
                 priority = {"INDIA": 0, "REMOTE": 1, "GLOBAL": 2}
@@ -1056,17 +1075,19 @@ class JobFetcherWorker:
         drives: List[Dict[str, Any]] = []
         slugs = company_slugs or ["supabase", "posthog", "linear", "notion", "zapier", "replit"]
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                all_hits: List[Dict[str, Any]] = []
-                for slug in slugs:
+            async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                sem = asyncio.Semaphore(8)
+
+                async def _fetch_ashby_board(slug: str) -> List[Dict[str, Any]]:
                     url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+                    hits: List[Dict[str, Any]] = []
                     try:
-                        res = await client.get(url)
+                        async with sem:
+                            res = await client.get(url)
                         if res.status_code != 200:
-                            continue
+                            return hits
                         jobs = res.json().get("jobs", [])
                         comp_name = slug.capitalize()
-                        per_comp = 0
                         for j in jobs:
                             if j.get("isListed") is False:
                                 continue
@@ -1087,23 +1108,29 @@ class JobFetcherWorker:
                                 ):
                                     region = "REMOTE"
 
-                            cand = self._build_candidate(
-                                company_name=comp_name,
-                                role_title=title,
-                                location=loc,
-                                job_description=desc,
-                                application_url=app_url,
-                                source_platform="ASHBY",
-                                salary_package="18.0 LPA - 36.0 LPA",
-                                company_website=f"https://www.{slug}.com",
-                                force_region=region,
+                            hits.append(
+                                self._build_candidate(
+                                    company_name=comp_name,
+                                    role_title=title,
+                                    location=loc,
+                                    job_description=desc,
+                                    application_url=app_url,
+                                    source_platform="ASHBY",
+                                    salary_package="18.0 LPA - 36.0 LPA",
+                                    company_website=f"https://www.{slug}.com",
+                                    force_region=region,
+                                )
                             )
-                            all_hits.append(cand)
-                            per_comp += 1
-                            if per_comp >= 3:
+                            if len(hits) >= 3:
                                 break
                     except Exception as e:
                         logger.warning(f"Ashby fetch failed for {slug}: {e}")
+                    return hits
+
+                board_results = await asyncio.gather(*[_fetch_ashby_board(s) for s in slugs], return_exceptions=True)
+                all_hits: List[Dict[str, Any]] = [
+                    cand for res in board_results if isinstance(res, list) for cand in res
+                ]
 
                 priority = {"INDIA": 0, "REMOTE": 1, "GLOBAL": 2}
                 all_hits.sort(key=lambda c: priority.get(c["region_scope"], 3))
@@ -1134,54 +1161,73 @@ class JobFetcherWorker:
             "WesternDigital": "Western Digital India",
         }
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                for slug in slugs:
+            async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                sem = asyncio.Semaphore(8)
+
+                async def _fetch_sr_board(slug: str) -> List[tuple]:
                     url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?country=in&limit=15"
+                    items: List[tuple] = []
                     try:
-                        res = await client.get(url)
+                        async with sem:
+                            res = await client.get(url)
                         if res.status_code != 200:
-                            continue
-                        postings = res.json().get("content", [])
-                        per_comp = 0
-                        for p in postings:
+                            return items
+                        for p in res.json().get("content", []):
                             title = p.get("name", "")
-                            if not is_engineering_role(title):
-                                continue
-                            pid = p.get("id")
-                            detail_r = await client.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}")
-                            if detail_r.status_code != 200:
-                                continue
-                            detail = detail_r.json()
-                            if detail.get("active") is False:
-                                continue
-                            app_url = detail.get("applyUrl") or detail.get("postingUrl")
-                            if not app_url:
-                                continue
-                            sections = (detail.get("jobAd") or {}).get("sections") or {}
-                            desc_html = (sections.get("jobDescription") or {}).get("text", "")
-                            qual_html = (sections.get("qualifications") or {}).get("text", "")
-                            loc_obj = p.get("location") or {}
-                            city = (loc_obj.get("city") or "").strip().title()
-                            loc = f"{city}, India" if city else "India"
-                            drives.append(
-                                self._build_candidate(
-                                    company_name=display_names.get(slug, slug),
-                                    role_title=title,
-                                    location=loc,
-                                    job_description=f"{desc_html}\n\nQualifications:\n{qual_html}",
-                                    application_url=app_url,
-                                    source_platform="SMARTRECRUITERS",
-                                    salary_package="9.0 LPA - 20.0 LPA",
-                                    force_region="INDIA",
-                                )
-                            )
-                            per_comp += 1
-                            if per_comp >= 3 or len(drives) >= limit:
+                            if is_engineering_role(title) and p.get("id"):
+                                items.append((slug, p))
+                            if len(items) >= 4:
                                 break
                     except Exception as e:
-                        logger.warning(f"SmartRecruiters fetch failed for {slug}: {e}")
-                    if len(drives) >= limit:
-                        break
+                        logger.warning(f"SmartRecruiters list fetch failed for {slug}: {e}")
+                    return items
+
+                board_results = await asyncio.gather(*[_fetch_sr_board(s) for s in slugs], return_exceptions=True)
+                queued = [pair for res in board_results if isinstance(res, list) for pair in res][: max(limit * 2, 16)]
+
+                async def _fetch_sr_detail(slug: str, p: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                    pid = p.get("id")
+                    title = p.get("name", "")
+                    try:
+                        async with sem:
+                            detail_r = await client.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}")
+                        if detail_r.status_code != 200:
+                            return None
+                        detail = detail_r.json()
+                        if detail.get("active") is False:
+                            return None
+                        app_url = detail.get("applyUrl") or detail.get("postingUrl")
+                        if not app_url:
+                            return None
+                        sections = (detail.get("jobAd") or {}).get("sections") or {}
+                        desc_html = (sections.get("jobDescription") or {}).get("text", "")
+                        qual_html = (sections.get("qualifications") or {}).get("text", "")
+                        loc_obj = p.get("location") or {}
+                        city = (loc_obj.get("city") or "").strip().title()
+                        loc = f"{city}, India" if city else "India"
+                        return self._build_candidate(
+                            company_name=display_names.get(slug, slug),
+                            role_title=title,
+                            location=loc,
+                            job_description=f"{desc_html}\n\nQualifications:\n{qual_html}",
+                            application_url=app_url,
+                            source_platform="SMARTRECRUITERS",
+                            salary_package="9.0 LPA - 20.0 LPA",
+                            force_region="INDIA",
+                        )
+                    except Exception as e:
+                        logger.warning(f"SmartRecruiters detail fetch failed for {slug}/{pid}: {e}")
+                        return None
+
+                detail_results = await asyncio.gather(
+                    *[_fetch_sr_detail(slug, p) for slug, p in queued],
+                    return_exceptions=True,
+                )
+                for cand in detail_results:
+                    if isinstance(cand, dict):
+                        drives.append(cand)
+                        if len(drives) >= limit:
+                            break
         except Exception as e:
             logger.warning(f"Error in fetch_from_smartrecruiters: {e}")
         return drives
@@ -1361,7 +1407,11 @@ class JobFetcherWorker:
         return drives
 
     async def _verify_candidate_cached(
-        self, candidate: Dict[str, Any], client: httpx.AsyncClient, sem: asyncio.Semaphore
+        self,
+        candidate: Dict[str, Any],
+        client: httpx.AsyncClient,
+        sem: asyncio.Semaphore,
+        trust_live_api: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Verifies URL reachability & expiry with 1-hour cache and bounded concurrency."""
         url = candidate.get("application_url") or ""
@@ -1369,6 +1419,27 @@ class JobFetcherWorker:
             return None
 
         now = datetime.now(timezone.utc)
+        deadline = candidate.get("deadline_dt")
+        if deadline:
+            dl = deadline if deadline.tzinfo else deadline.replace(tzinfo=timezone.utc)
+            if dl < now:
+                return None
+
+        if trust_live_api:
+            candidate["verification_status"] = "VERIFIED_ACTIVE"
+            candidate["form_type"] = "DIRECT_FORM"
+            candidate["verified_at"] = now
+            self._verify_cache[url] = (
+                now,
+                {
+                    "is_valid": True,
+                    "is_active": True,
+                    "verification_status": "VERIFIED_ACTIVE",
+                    "form_type": "DIRECT_FORM",
+                },
+            )
+            return candidate
+
         cached = self._verify_cache.get(url)
         if cached and (now - cached[0]).total_seconds() < 3600:
             ver = cached[1]
@@ -1377,7 +1448,7 @@ class JobFetcherWorker:
                 ver = await verify_application_link_and_expiry(
                     url=url,
                     company_name=candidate.get("company_name", ""),
-                    deadline=candidate.get("deadline_dt"),
+                    deadline=deadline,
                     client=client,
                 )
             self._verify_cache[url] = (now, ver)
@@ -1421,47 +1492,76 @@ class JobFetcherWorker:
                 )
             )
 
-        # 2. Fetch live verified ATS & GitHub feeds concurrently
-        results = await asyncio.gather(
-            self.fetch_from_greenhouse(limit=16),
-            self.fetch_from_ashby(limit=12),
-            self.fetch_from_smartrecruiters(limit=12),
-            self.fetch_from_simplify_github(limit=20),
-            self.fetch_from_lever(limit=6),
-            self.fetch_from_arbeitnow(limit=6),
-            self.fetch_from_jobicy(limit=6),
-            self.fetch_from_remotive(limit=6),
-            self.fetch_from_jobspy(limit=5, search_term="Software Engineer", location=location_filter or "India"),
-            return_exceptions=True,
-        )
-        live_greenhouse = results[0] if isinstance(results[0], list) else []
-        live_ashby = results[1] if isinstance(results[1], list) else []
-        live_smartrecruiters = results[2] if isinstance(results[2], list) else []
-        live_simplify = results[3] if isinstance(results[3], list) else []
-        live_lever = results[4] if isinstance(results[4], list) else []
-        live_arbeitnow = results[5] if isinstance(results[5], list) else []
-        live_jobicy = results[6] if isinstance(results[6], list) else []
-        live_remotive = results[7] if isinstance(results[7], list) else []
-        live_jobspy = results[8] if isinstance(results[8], list) else []
+        # 2. Fetch live verified ATS & GitHub feeds concurrently with strict per-source time budgets
+        async def _run_source(name: str, coro: Any, timeout_sec: float = 12.0) -> List[Dict[str, Any]]:
+            try:
+                res = await asyncio.wait_for(coro, timeout=timeout_sec)
+                return res if isinstance(res, list) else []
+            except asyncio.TimeoutError:
+                logger.warning(f"Source {name} timed out after {timeout_sec}s; skipping in this cycle.")
+                return []
+            except Exception as exc:
+                logger.warning(f"Source {name} failed: {exc}")
+                return []
 
-        candidates.extend(live_greenhouse)
-        candidates.extend(live_ashby)
-        candidates.extend(live_smartrecruiters)
-        candidates.extend(live_simplify)
-        candidates.extend(live_lever)
-        candidates.extend(live_arbeitnow)
-        candidates.extend(live_jobicy)
-        candidates.extend(live_remotive)
-        candidates.extend(live_jobspy)
-
-        # Filter to true location matches if location_filter provided (NO synthetic cloning)
         is_filtered = bool(location_filter and location_filter.strip() and location_filter.lower() != "all")
+        canonical_loc = canonicalize_location_query(location_filter) if is_filtered else None
+        loc_terms = expand_location_terms(location_filter) if is_filtered else []
+
+        results = await asyncio.gather(
+            _run_source("greenhouse", self.fetch_from_greenhouse(limit=16), 12.0),
+            _run_source("ashby", self.fetch_from_ashby(limit=12), 10.0),
+            _run_source("smartrecruiters", self.fetch_from_smartrecruiters(limit=12), 12.0),
+            _run_source("simplify_github", self.fetch_from_simplify_github(limit=20), 10.0),
+            _run_source("lever", self.fetch_from_lever(limit=6), 10.0),
+            _run_source("arbeitnow", self.fetch_from_arbeitnow(limit=6), 8.0),
+            _run_source("jobicy", self.fetch_from_jobicy(limit=6), 8.0),
+            _run_source("remotive", self.fetch_from_remotive(limit=6), 8.0),
+            _run_source(
+                "jobspy",
+                self.fetch_from_jobspy(limit=5, search_term="Software Engineer", location=canonical_loc or "India"),
+                10.0,
+            ),
+        )
+        live_greenhouse, live_ashby, live_smartrecruiters, live_simplify, live_lever, live_arbeitnow, live_jobicy, live_remotive, live_jobspy = results
+
+        # Postings just retrieved from official JSON ATS APIs (and verified non-expired) need no redundant HTML GET
+        live_api_urls = {
+            c["application_url"].lower().rstrip("/")
+            for c in (live_greenhouse + live_ashby + live_smartrecruiters + live_lever)
+        }
+
+        for batch in results:
+            candidates.extend(batch)
+
+        # Filter to true location/alias matches if location_filter provided (NO synthetic cloning)
+        resolved_loc = canonical_loc if is_filtered else "All"
+        exact_match_count = 0
+        pan_india_fallback_used = False
         if is_filtered:
-            loc_key = location_filter.strip().lower()
-            candidates = [
+            district_matches = [
                 c for c in candidates
-                if loc_key in c.get("location", "").lower() or loc_key in c.get("job_description", "").lower()
+                if any(
+                    term in c.get("location", "").lower() or term in c.get("job_description", "").lower()
+                    for term in loc_terms
+                )
             ]
+            exact_match_count = len(district_matches)
+            # When a smaller district has few local office listings, also ingest real Pan-India & Remote
+            # openings (preserving their true locations) so students still receive actionable results.
+            if exact_match_count < 5:
+                pan_india_fallback_used = True
+                fallback_pool = [
+                    c for c in candidates
+                    if c not in district_matches
+                    and (
+                        c.get("region_scope") == "REMOTE"
+                        or any(k in c.get("location", "").lower() for k in ("pan india", "anywhere", "remote"))
+                    )
+                ]
+                candidates = district_matches + fallback_pool[:15]
+            else:
+                candidates = district_matches
 
         # 3. In-batch deduplication + HTTP liveness & expiry verification
         deduped_candidates: List[Dict[str, Any]] = []
@@ -1476,11 +1576,20 @@ class JobFetcherWorker:
             seen_batch_urls.add(burl)
             deduped_candidates.append(c)
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(16)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers=headers) as verify_client:
+        fast_timeout = httpx.Timeout(4.0, connect=2.5, read=3.5)
+        async with httpx.AsyncClient(timeout=fast_timeout, follow_redirects=True, headers=headers) as verify_client:
             verified_raw = await asyncio.gather(
-                *[self._verify_candidate_cached(c, verify_client, sem) for c in deduped_candidates],
+                *[
+                    self._verify_candidate_cached(
+                        c,
+                        verify_client,
+                        sem,
+                        trust_live_api=(c["application_url"].lower().rstrip("/") in live_api_urls),
+                    )
+                    for c in deduped_candidates
+                ],
                 return_exceptions=True,
             )
         verified_candidates = [v for v in verified_raw if isinstance(v, dict)]
@@ -1577,11 +1686,15 @@ class JobFetcherWorker:
                         updated_companies.append(company)
 
             count_query = select(func.count(PlacementDrive.id)).where(
-                PlacementDrive.college_id == college_id,
+                (PlacementDrive.college_id == college_id)
+                | (PlacementDrive.college_id == "col-anna-001")
+                | (PlacementDrive.college_id == None),
                 PlacementDrive.verification_status != "EXPIRED",
             )
-            if is_filtered:
-                count_query = count_query.where(func.lower(PlacementDrive.location).like(f"%{location_filter.strip().lower()}%"))
+            if is_filtered and loc_terms:
+                count_query = count_query.where(
+                    or_(*[func.lower(PlacementDrive.location).like(f"%{t}%") for t in loc_terms])
+                )
             total_matching = session.exec(count_query).one()
 
         self.last_sync_time = now
@@ -1599,6 +1712,9 @@ class JobFetcherWorker:
             "total_active_drives": total_matching,
             "companies_added": added_companies,
             "location_filtered": location_filter or "All",
+            "resolved_location": resolved_loc,
+            "exact_district_matches": exact_match_count,
+            "pan_india_fallback_used": pan_india_fallback_used,
             "source_breakdown": {
                 "verified_tracks": len(VERIFIED_CAMPUS_DRIVES),
                 "greenhouse_live": len(live_greenhouse),
