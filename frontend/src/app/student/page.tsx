@@ -64,6 +64,8 @@ export default function StudentPortalPage() {
     total: 0,
   });
   const [loadingMatches, setLoadingMatches] = useState(false);
+  const [eligibilityFilter, setEligibilityFilter] = useState<"all" | "eligible" | "not_eligible" | "targets">("all");
+  const [companyFilterQuery, setCompanyFilterQuery] = useState("");
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -942,6 +944,22 @@ ${note}
     }
   };
 
+  const matchesDriveFilters = (d: any) => {
+    if (filterNewOnly && !(d.is_new && !seenDriveIds.includes(d.id))) return false;
+    if (eligibilityFilter === "eligible" && !(d.eligibility?.is_eligible ?? true)) return false;
+    if (eligibilityFilter === "not_eligible" && (d.eligibility?.is_eligible ?? true)) return false;
+    if (eligibilityFilter === "targets" && !d.eligibility?.is_target_company) return false;
+    const q = companyFilterQuery.trim().toLowerCase();
+    if (
+      q &&
+      !(d.company_name || "").toLowerCase().includes(q) &&
+      !(d.role_title || "").toLowerCase().includes(q)
+    ) {
+      return false;
+    }
+    return true;
+  };
+
   const renderDriveCard = (d: any) => {
     const isUnseenNew = d.is_new && !seenDriveIds.includes(d.id);
     const rm = d.resume_match;
@@ -1500,7 +1518,7 @@ ${note}
             </div>
           </div>
 
-          {/* Resume-Based Job Matching Controls (3 Modes) */}
+          {/* Resume-Based Job Matching Controls (3 Modes - Upload lives in Settings) */}
           <ResumeMatchControls
             matchMode={matchMode}
             onChangeMode={handleChangeMatchMode}
@@ -1508,22 +1526,82 @@ ${note}
             resumeSummary={resumeSummaryMeta}
             counts={matchCounts}
             loadingMatches={loadingMatches}
-            uploadingResume={uploadingResume}
             onRefreshMatches={handleRefreshMatches}
-            onUploadResume={handleResumeUploadForAcademic}
+            onGoToSettings={() => setTab("settings")}
           />
+
+          {/* Eligibility & Target Filtering Bar on Job Displaying Page */}
+          <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {[
+                { key: "all", label: `All (${drives.length})` },
+                {
+                  key: "eligible",
+                  label: `Eligible (${drives.filter((d: any) => d.eligibility?.is_eligible ?? true).length})`,
+                },
+                {
+                  key: "not_eligible",
+                  label: `Not Eligible (${drives.filter((d: any) => d.eligibility && !d.eligibility.is_eligible).length})`,
+                },
+                {
+                  key: "targets",
+                  label: `Dream Targets (${drives.filter((d: any) => d.eligibility?.is_target_company).length})`,
+                },
+              ].map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  onClick={() => setEligibilityFilter(f.key as any)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    eligibilityFilter === f.key
+                      ? "bg-indigo-600 text-white shadow-xs"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="relative w-full sm:w-64">
+              <input
+                type="text"
+                value={companyFilterQuery}
+                onChange={(e) => setCompanyFilterQuery(e.target.value)}
+                placeholder="Filter by company or role..."
+                className="w-full pl-3 pr-3 py-1.5 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50"
+              />
+            </div>
+          </div>
 
           <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
             <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <span>Campus Recruitment Drives {selectedLocation !== "All" ? `in ${selectedLocation}` : ""}</span>
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-semibold border border-indigo-200">
-                {drives.length} drives shown
+                {drives.filter(matchesDriveFilters).length} drives shown
               </span>
             </h2>
             <span className="text-xs text-slate-500 font-medium">
               Skill &amp; experience scoring is evaluated independently from academic eligibility
             </span>
           </div>
+
+          {drives.length > 0 && drives.filter(matchesDriveFilters).length === 0 && (
+            <div className="bg-white rounded-2xl p-6 border border-slate-200 text-center space-y-2.5">
+              <p className="font-bold text-slate-800 text-sm">No drives match the active eligibility or search filter.</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setEligibilityFilter("all");
+                  setCompanyFilterQuery("");
+                  setFilterNewOnly(false);
+                }}
+                className="px-4 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs border border-indigo-200 transition cursor-pointer"
+              >
+                Reset Eligibility &amp; Search Filters
+              </button>
+            </div>
+          )}
 
           {drives.length === 0 && (
             <div className="bg-white rounded-2xl p-8 border border-slate-200 text-center space-y-3">
@@ -1571,50 +1649,44 @@ ${note}
                       <Sparkles className="w-4 h-4 text-violet-600" />
                       <span>Personalized Matches for Your Resume</span>
                       <span className="text-xs px-2.5 py-0.5 rounded-full bg-violet-100 text-violet-800 font-bold">
-                        {personalizedDrives.filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id))).length}
+                        {personalizedDrives.filter(matchesDriveFilters).length}
                       </span>
                     </h3>
                     <span className="text-[11px] text-slate-500 font-medium">Ranked highest to lowest relevance (≥30%)</span>
                   </div>
-                  {personalizedDrives.length === 0 ? (
+                  {personalizedDrives.filter(matchesDriveFilters).length === 0 ? (
                     <div className="bg-violet-50/40 rounded-2xl p-6 border border-dashed border-violet-200 text-center text-xs text-slate-600">
-                      No drives reached the 30% skill/experience threshold for this hub yet. All active opportunities are listed below.
+                      No personalized resume matches meet the active eligibility/search filter.
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                      {personalizedDrives
-                        .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
-                        .map((d: any) => renderDriveCard(d))}
+                      {personalizedDrives.filter(matchesDriveFilters).map((d: any) => renderDriveCard(d))}
                     </div>
                   )}
                 </div>
               )}
 
               {/* Section 2: All Other Available Jobs */}
-              {otherDrives.length > 0 && (
+              {otherDrives.filter(matchesDriveFilters).length > 0 && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                     <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
                       <Globe className="w-4 h-4 text-indigo-600" />
                       <span>{hasResume ? "All Other Available Jobs" : "All Available Jobs"}</span>
                       <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-bold">
-                        {otherDrives.filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id))).length}
+                        {otherDrives.filter(matchesDriveFilters).length}
                       </span>
                     </h3>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {otherDrives
-                      .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
-                      .map((d: any) => renderDriveCard(d))}
+                    {otherDrives.filter(matchesDriveFilters).map((d: any) => renderDriveCard(d))}
                   </div>
                 </div>
               )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {drives
-                .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
-                .map((d: any) => renderDriveCard(d))}
+              {drives.filter(matchesDriveFilters).map((d: any) => renderDriveCard(d))}
             </div>
           )}
         </div>
@@ -2531,6 +2603,10 @@ ${note}
               eligibilityData={eligibilityData}
               loadingEligibility={loadingEligibility}
               isPreviewMode={isPreviewMode}
+              onViewJobs={() => {
+                setEligibilityFilter("eligible");
+                setTab("drives");
+              }}
             />
 
             {/* Setting 4: Telegram Live Alerts */}

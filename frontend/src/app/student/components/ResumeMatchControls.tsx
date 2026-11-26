@@ -4,11 +4,11 @@ import React from "react";
 import {
   Sparkles,
   FileText,
-  Upload,
   RefreshCw,
   Layers,
   Target,
   Globe,
+  Settings,
 } from "lucide-react";
 
 export type JobMatchMode = "both" | "based_on_resume" | "all";
@@ -30,9 +30,8 @@ interface ResumeMatchControlsProps {
   resumeSummary: ResumeSummaryMeta | null;
   counts: { personalized: number; others: number; total: number };
   loadingMatches: boolean;
-  uploadingResume: boolean;
   onRefreshMatches: () => void;
-  onUploadResume: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onGoToSettings: () => void;
 }
 
 export default function ResumeMatchControls({
@@ -42,13 +41,12 @@ export default function ResumeMatchControls({
   resumeSummary,
   counts,
   loadingMatches,
-  uploadingResume,
   onRefreshMatches,
-  onUploadResume,
+  onGoToSettings,
 }: ResumeMatchControlsProps) {
   return (
     <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-sm space-y-3.5">
-      {/* Top Row: Mode Switcher + Actions */}
+      {/* Top Row: Mode Switcher */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
@@ -106,7 +104,7 @@ export default function ResumeMatchControls({
         </div>
       </div>
 
-      {/* Bottom Row: Active Resume Context OR Upload Prompt */}
+      {/* Bottom Row: Active Resume Context OR Prompt to Upload in Settings */}
       {hasResume && resumeSummary ? (
         <div className="p-3 rounded-xl bg-gradient-to-r from-violet-50/80 to-indigo-50/70 border border-violet-200/70 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
           <div className="space-y-1.5">
@@ -146,31 +144,11 @@ export default function ResumeMatchControls({
               type="button"
               onClick={onRefreshMatches}
               disabled={loadingMatches}
-              className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 border border-violet-200 text-violet-800 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-50 border border-violet-200 text-violet-800 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loadingMatches ? "animate-spin" : ""}`} />
               <span>{loadingMatches ? "Refreshing..." : "Refresh Matches"}</span>
             </button>
-
-            <label
-              htmlFor="drives-quick-resume-upload"
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition shadow-2xs cursor-pointer ${
-                uploadingResume
-                  ? "bg-violet-300 text-white cursor-wait"
-                  : "bg-violet-600 hover:bg-violet-700 text-white"
-              }`}
-            >
-              <Upload className="w-3.5 h-3.5" />
-              <span>{uploadingResume ? "Uploading..." : "Update Resume"}</span>
-              <input
-                id="drives-quick-resume-upload"
-                type="file"
-                accept=".pdf,application/pdf"
-                disabled={uploadingResume}
-                onChange={onUploadResume}
-                className="hidden"
-              />
-            </label>
           </div>
         </div>
       ) : (
@@ -179,35 +157,23 @@ export default function ResumeMatchControls({
             <div className="space-y-0.5">
               <p className="font-bold text-amber-950 flex items-center gap-1.5">
                 <FileText className="w-4 h-4 text-amber-600" />
-                <span>Upload Your Resume to Unlock Personalized Job Matches</span>
+                <span>No Resume Uploaded for Personalized Matching</span>
               </p>
               <p className="text-[11px] text-amber-800">
-                No resume found yet. Upload a PDF resume to rank jobs by your skills, internships, projects, certifications, and achievements.
+                Upload your resume in Settings → Academic &amp; Eligibility Data to unlock skill, project, and internship matching.
               </p>
             </div>
-            <label
-              htmlFor="drives-missing-resume-upload"
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0 transition shadow-sm cursor-pointer ${
-                uploadingResume
-                  ? "bg-amber-300 text-white cursor-wait"
-                  : "bg-amber-600 hover:bg-amber-700 text-white"
-              }`}
+            <button
+              type="button"
+              onClick={onGoToSettings}
+              className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0 transition shadow-sm cursor-pointer"
             >
-              <Upload className="w-3.5 h-3.5" />
-              <span>{uploadingResume ? "Parsing PDF..." : "Upload Resume (PDF)"}</span>
-              <input
-                id="drives-missing-resume-upload"
-                type="file"
-                accept=".pdf,application/pdf"
-                disabled={uploadingResume}
-                onChange={onUploadResume}
-                className="hidden"
-              />
-            </label>
+              <Settings className="w-3.5 h-3.5" />
+              <span>Go to Settings</span>
+            </button>
           </div>
         )
       )}
     </div>
   );
 }
-
