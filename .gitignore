@@ -28,6 +28,8 @@ frontend/.env.local
 
 # SQLite Databases & Local Storage
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

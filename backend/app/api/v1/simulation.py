@@ -8,6 +8,22 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from app.core.config import settings
 
+import re
+
+DANGEROUS_PATTERNS = [
+    re.compile(r"\bimport\s+(os|subprocess|shutil|socket|ctypes|winreg|pty)\b", re.IGNORECASE),
+    re.compile(r"\bfrom\s+(os|subprocess|shutil|socket|ctypes|winreg|pty)\b", re.IGNORECASE),
+    re.compile(r"\b(__import__|exec|eval)\s*\(", re.IGNORECASE),
+    re.compile(r"\b(process\.exit|child_process|fs\.unlink|fs\.rmdir|fs\.write)\b", re.IGNORECASE),
+]
+
+def _is_safe_code(code: str) -> bool:
+    for pat in DANGEROUS_PATTERNS:
+        if pat.search(code):
+            return False
+    return True
+
+
 router = APIRouter(prefix="/simulation", tags=["Placement Coding Simulation"])
 
 class CodeExecutionRequest(BaseModel):
@@ -90,6 +106,16 @@ async def execute_code_sandbox(req: CodeExecutionRequest):
 
     # Tier 2: Safe Local Execution with strict timeout
     try:
+        if not _is_safe_code(req.code):
+            return {
+                "stdout": "",
+                "stderr": "Security validation failed: Code contains disallowed system modules or unsafe operations.",
+                "exit_code": 1,
+                "execution_time_ms": 1,
+                "memory_mb": 0.0,
+                "status": "SECURITY_VIOLATION"
+            }
+
         cmd = None
         if lang in ("python", "py"):
             cmd = [sys.executable, "-c", req.code]

@@ -78,8 +78,13 @@ async def upload_resume(
     student_id = student.id if student else current_user.id
     college_id = current_user.college_id or "global"
 
-    # Read PDF content
+    # Read PDF content with size validation
     content = await file.read()
+    if not content or len(content) == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded PDF file is empty")
+    if len(content) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Resume PDF exceeds 15MB limit")
+
     raw_text = ""
     try:
         reader = PdfReader(io.BytesIO(content))

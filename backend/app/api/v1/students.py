@@ -3,7 +3,7 @@ from sqlmodel import Session, select, func
 from typing import List, Optional
 from pydantic import BaseModel
 from app.core.database import get_session
-from app.core.tenant import get_current_user, require_roles
+from app.core.tenant import get_current_user, require_roles, get_department_details
 from app.models.entities import StudentProfile, User, Department, Application
 from app.models.enums import UserRole
 
@@ -30,13 +30,7 @@ def get_student_profile(
     if not student:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student profile not found")
 
-    dept_name = None
-    dept_code = None
-    if student.department_id:
-        dept = session.get(Department, student.department_id)
-        if dept:
-            dept_name = f"{dept.name} ({dept.code})"
-            dept_code = dept.code
+    dept_code, dept_name = get_department_details(session, student.department_id)
 
     # Applications count
     apps_count = len(session.exec(select(Application).where(Application.student_id == student.id)).all())
@@ -100,13 +94,7 @@ def update_student_profile(
     session.commit()
     session.refresh(student)
 
-    dept_code = None
-    dept_name = None
-    if student.department_id:
-        dept = session.get(Department, student.department_id)
-        if dept:
-            dept_code = dept.code
-            dept_name = f"{dept.name} ({dept.code})"
+    dept_code, dept_name = get_department_details(session, student.department_id)
 
     return {
         "message": "Profile updated successfully",

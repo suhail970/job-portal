@@ -52,7 +52,7 @@ class StudentProfile(SQLModel, table=True):
     college_id: str = Field(foreign_key="colleges.id", index=True)
     department_id: Optional[str] = Field(default=None, foreign_key="departments.id", index=True)
     roll_number: str = Field(index=True)
-    cgpa: float = Field(default=0.0)
+    cgpa: float = Field(default=0.0, index=True)
     standing_arrears: int = Field(default=0)
     history_arrears: int = Field(default=0)
     graduation_year: int = Field(default=2026)
@@ -78,7 +78,7 @@ class PlacementDrive(SQLModel, table=True):
     min_cgpa: float = Field(default=6.0)
     max_arrears: int = Field(default=0)
     allowed_departments: str = Field(default="CSE,IT,ECE") # Comma-separated or JSON
-    drive_date: datetime
+    drive_date: datetime = Field(index=True)
     registration_deadline: datetime
     status: DriveStatus = Field(default=DriveStatus.UPCOMING, index=True)
     application_url: Optional[str] = Field(default=None) # Direct external/company portal link
@@ -129,7 +129,7 @@ class PlacementPreparationPlan(SQLModel, table=True):
     company_name: str
     role_title: str
     target_timeframe: CountdownTarget = Field(default=CountdownTarget.THREE_DAYS)
-    drive_date: datetime
+    drive_date: datetime = Field(index=True)
     generated_roadmap: str = Field(default="{}") # JSON of days and topics
     completed_tasks: str = Field(default="[]") # JSON list of task IDs
     overall_progress: float = Field(default=0.0)

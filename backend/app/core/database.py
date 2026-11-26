@@ -1,13 +1,23 @@
 from sqlmodel import SQLModel, create_engine, Session, select, func
+from sqlalchemy import event, text
 from datetime import datetime, timezone, timedelta
 from app.core.config import settings
 from app.core.security import hash_password
 from app.models.enums import UserRole, DriveStatus
 from app.models.entities import College, Department, User, StudentProfile, PlacementDrive, CronJob, CronExecution, CompanyPlaybook
 
-# Configure database engine
-connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
+# Configure database engine with SQLite WAL & concurrency timeout
+connect_args = {"check_same_thread": False, "timeout": 30} if settings.DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(settings.DATABASE_URL, echo=False, connect_args=connect_args)
+
+if settings.DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA busy_timeout=5000;")
+        cursor.close()
 
 def get_session():
     with Session(engine) as session:
@@ -18,7 +28,6 @@ def init_db():
     
     # Auto-migrate SQLite schema for missing columns on existing tables
     if settings.DATABASE_URL.startswith("sqlite"):
-        from sqlalchemy import text
         with engine.connect() as conn:
             try:
                 result = conn.execute(text("PRAGMA table_info(placement_drives)")).fetchall()
@@ -35,9 +44,15 @@ def init_db():
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN verification_status VARCHAR DEFAULT 'VERIFIED_ACTIVE'"))
                 if "expected_fields" not in col_names:
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN expected_fields TEXT"))
+                
+                # Performance indexes for high-throughput filtering and sorting
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_placement_drives_drive_date ON placement_drives (drive_date)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_placement_drives_college_status ON placement_drives (college_id, status)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_student_profiles_cgpa ON student_profiles (cgpa)"))
                 conn.commit()
             except Exception as e:
                 print(f"Schema migration notice: {e}")
+
 
     with Session(engine) as session:
         # Check if default Hermes Cron Jobs exist

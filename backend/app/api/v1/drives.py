@@ -49,7 +49,7 @@ def list_drives(
         query = query.where(
             (PlacementDrive.college_id == current_user.college_id) |
             (PlacementDrive.college_id == "col-anna-001") |
-            (PlacementDrive.college_id == None)
+            (PlacementDrive.college_id.is_(None))
         )
         
     if status_filter:

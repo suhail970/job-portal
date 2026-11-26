@@ -55,3 +55,14 @@ def get_current_tenant_id(current_user: User = Depends(get_current_user)) -> Opt
         )
     return current_user.college_id
 
+def get_department_details(session: Session, department_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Returns (department_code, formatted_department_name) for a given department_id."""
+    if not department_id:
+        return None, None
+    from app.models.entities import Department
+    dept = session.get(Department, department_id)
+    if dept:
+        return dept.code, f"{dept.name} ({dept.code})"
+    return None, None
+
+

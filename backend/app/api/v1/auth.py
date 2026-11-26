@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.core.database import get_session
 from app.core.security import verify_password, hash_password, create_access_token
-from app.core.tenant import get_current_user
+from app.core.tenant import get_current_user, get_department_details
 from app.models.entities import User, College, StudentProfile, Department
 from app.models.enums import UserRole
 
@@ -162,11 +162,8 @@ def get_me(current_user: User = Depends(get_current_user), session: Session = De
         student_profile = session.exec(
             select(StudentProfile).where(StudentProfile.user_id == current_user.id)
         ).first()
-        if student_profile and student_profile.department_id:
-            dept = session.get(Department, student_profile.department_id)
-            if dept:
-                department_code = dept.code
-                department_name = f"{dept.name} ({dept.code})"
+        if student_profile:
+            department_code, department_name = get_department_details(session, student_profile.department_id)
 
     return {
         "id": current_user.id,
