@@ -6,7 +6,9 @@ env/
 
 # Next.js Build Outputs
 frontend/.next/
+frontend/.next-dev/
 frontend/out/
+frontend/tsconfig.tsbuildinfo
 dist/
 build/
 
