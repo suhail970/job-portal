@@ -55,12 +55,17 @@ class StudentProfile(SQLModel, table=True):
     cgpa: float = Field(default=0.0, index=True)
     standing_arrears: int = Field(default=0)
     history_arrears: int = Field(default=0)
+    tenth_percentage: Optional[float] = Field(default=None)
+    secondary_qualification_type: str = Field(default="HSC") # "HSC" | "DIPLOMA"
+    twelfth_percentage: Optional[float] = Field(default=None) # 12th HSC % or Diploma %
     graduation_year: int = Field(default=2026)
     phone_number: Optional[str] = None
     telegram_chat_id: Optional[str] = Field(default=None, index=True)
     bio: Optional[str] = None
     github_url: Optional[str] = None
     linkedin_url: Optional[str] = None
+    target_companies: Optional[str] = Field(default=None)
+    target_min_ctc: Optional[float] = Field(default=None) # Numeric LPA e.g. 8.0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # -------------------------------------------------------------
@@ -77,6 +82,10 @@ class PlacementDrive(SQLModel, table=True):
     salary_package: Optional[str] = "6.5 LPA - 12 LPA"
     min_cgpa: float = Field(default=6.0)
     max_arrears: int = Field(default=0)
+    max_history_arrears: Optional[int] = Field(default=None)
+    min_tenth_percentage: Optional[float] = Field(default=None)
+    min_twelfth_percentage: Optional[float] = Field(default=None)
+    accepts_diploma: bool = Field(default=True)
     allowed_departments: str = Field(default="CSE,IT,ECE") # Comma-separated or JSON
     drive_date: datetime = Field(index=True)
     registration_deadline: datetime

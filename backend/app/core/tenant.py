@@ -66,3 +66,17 @@ def get_department_details(session: Session, department_id: Optional[str]) -> tu
     return None, None
 
 
+def get_tenant_drives(session: Session, college_id: Optional[str]):
+    """Returns all PlacementDrive rows accessible to the tenant ordered by drive_date asc."""
+    from app.models.entities import PlacementDrive
+    query = select(PlacementDrive)
+    if college_id:
+        query = query.where(
+            (PlacementDrive.college_id == college_id) |
+            (PlacementDrive.college_id == "col-anna-001") |
+            (PlacementDrive.college_id.is_(None))
+        )
+    return session.exec(query.order_by(PlacementDrive.drive_date.asc())).all()
+
+
+

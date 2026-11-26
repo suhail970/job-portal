@@ -193,11 +193,17 @@ export const api = {
       body: JSON.stringify({ provider, custom_config }),
     }),
 
-  // Student Profile Settings
+  // Student Profile Settings & Eligibility Engine
   getStudentProfile: () => request("/students/me"),
   updateStudentProfile: (data: any) =>
     request("/students/me", {
       method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  getMyEligibility: () => request("/students/me/eligibility"),
+  previewEligibility: (data: any) =>
+    request("/students/me/eligibility/preview", {
+      method: "POST",
       body: JSON.stringify(data),
     }),
 

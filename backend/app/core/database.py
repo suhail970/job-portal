@@ -44,6 +44,28 @@ def init_db():
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN verification_status VARCHAR DEFAULT 'VERIFIED_ACTIVE'"))
                 if "expected_fields" not in col_names:
                     conn.execute(text("ALTER TABLE placement_drives ADD COLUMN expected_fields TEXT"))
+                if "min_tenth_percentage" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN min_tenth_percentage FLOAT"))
+                if "min_twelfth_percentage" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN min_twelfth_percentage FLOAT"))
+                if "max_history_arrears" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN max_history_arrears INTEGER"))
+                if "accepts_diploma" not in col_names:
+                    conn.execute(text("ALTER TABLE placement_drives ADD COLUMN accepts_diploma BOOLEAN DEFAULT 1"))
+
+                # Auto-migrate student_profiles columns
+                sp_result = conn.execute(text("PRAGMA table_info(student_profiles)")).fetchall()
+                sp_cols = [r[1] for r in sp_result]
+                if "tenth_percentage" not in sp_cols:
+                    conn.execute(text("ALTER TABLE student_profiles ADD COLUMN tenth_percentage FLOAT"))
+                if "secondary_qualification_type" not in sp_cols:
+                    conn.execute(text("ALTER TABLE student_profiles ADD COLUMN secondary_qualification_type VARCHAR DEFAULT 'HSC'"))
+                if "twelfth_percentage" not in sp_cols:
+                    conn.execute(text("ALTER TABLE student_profiles ADD COLUMN twelfth_percentage FLOAT"))
+                if "target_companies" not in sp_cols:
+                    conn.execute(text("ALTER TABLE student_profiles ADD COLUMN target_companies VARCHAR"))
+                if "target_min_ctc" not in sp_cols:
+                    conn.execute(text("ALTER TABLE student_profiles ADD COLUMN target_min_ctc FLOAT"))
                 
                 # Performance indexes for high-throughput filtering and sorting
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_placement_drives_drive_date ON placement_drives (drive_date)"))

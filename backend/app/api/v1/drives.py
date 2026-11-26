@@ -4,10 +4,11 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel
 from app.core.database import get_session
-from app.core.tenant import get_current_user, require_roles
+from app.core.tenant import get_current_user, require_roles, get_department_details
 from app.models.entities import PlacementDrive, Application, StudentProfile, Resume, User
 from app.models.enums import UserRole, DriveStatus, ApplicationStatus
 from app.ai.agents.gap_leaf import match_resume_to_drive
+from app.services.eligibility_engine import evaluate_drive_eligibility
 from app.workers.telegram_worker import telegram_worker
 from app.workers.cron_scheduler import cron_scheduler
 import json
@@ -22,6 +23,10 @@ class CreateDriveRequest(BaseModel):
     salary_package: Optional[str] = "6.5 LPA - 12 LPA"
     min_cgpa: float = 6.0
     max_arrears: int = 0
+    max_history_arrears: Optional[int] = None
+    min_tenth_percentage: Optional[float] = None
+    min_twelfth_percentage: Optional[float] = None
+    accepts_diploma: bool = True
     allowed_departments: str = "CSE,IT,ECE"
     drive_date: datetime
     registration_deadline: datetime
@@ -62,10 +67,12 @@ def list_drives(
     query = query.order_by(PlacementDrive.drive_date.asc())
     drives = session.exec(query).all()
 
-    # Track applications for current student user
+    # Track applications & eligibility for current student user
     applied_map = {}
     student = session.exec(select(StudentProfile).where(StudentProfile.user_id == current_user.id)).first()
+    student_dept_code = None
     if student:
+        student_dept_code, _ = get_department_details(session, student.department_id)
         apps = session.exec(select(Application).where(Application.student_id == student.id)).all()
         for a in apps:
             applied_map[a.drive_id] = {
@@ -107,6 +114,8 @@ def list_drives(
         d_dict["match_score"] = app_info.get("match_score", None)
         d_dict["application_id"] = app_info.get("application_id", None)
         d_dict["applied_at"] = app_info.get("applied_at", None)
+        if student:
+            d_dict["eligibility"] = evaluate_drive_eligibility(student, student_dept_code, d)
         results.append(d_dict)
 
     return results
@@ -183,7 +192,24 @@ def create_drive(
 ):
     if not current_user.college_id and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="TPO must belong to a college")
-        
+
+    if req.min_cgpa < 0.0 or req.min_cgpa > 10.0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Min CGPA must be between 0.0 and 10.0")
+    if req.max_arrears < 0 or req.max_arrears > 50:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Max arrears must be between 0 and 50")
+    if req.max_history_arrears is not None:
+        if req.max_history_arrears < 0 or req.max_history_arrears > 50:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Max history arrears must be between 0 and 50")
+        if req.max_history_arrears < req.max_arrears:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Max history arrears cannot be less than max standing arrears"
+            )
+    if req.min_tenth_percentage is not None and (req.min_tenth_percentage < 0.0 or req.min_tenth_percentage > 100.0):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Min 10th % must be between 0.0 and 100.0")
+    if req.min_twelfth_percentage is not None and (req.min_twelfth_percentage < 0.0 or req.min_twelfth_percentage > 100.0):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Min 12th / Diploma % must be between 0.0 and 100.0")
+
     drive = PlacementDrive(
         college_id=current_user.college_id or "global",
         company_name=req.company_name,
@@ -191,11 +217,18 @@ def create_drive(
         job_description=req.job_description,
         location=req.location,
         salary_package=req.salary_package,
-        min_cgpa=req.min_cgpa,
+        min_cgpa=round(req.min_cgpa, 2),
         max_arrears=req.max_arrears,
+        max_history_arrears=req.max_history_arrears,
+        min_tenth_percentage=round(req.min_tenth_percentage, 2) if req.min_tenth_percentage is not None else None,
+        min_twelfth_percentage=round(req.min_twelfth_percentage, 2) if req.min_twelfth_percentage is not None else None,
+        accepts_diploma=req.accepts_diploma,
         allowed_departments=req.allowed_departments,
         drive_date=req.drive_date,
         registration_deadline=req.registration_deadline,
+        application_url=req.application_url,
+        company_website=req.company_website,
+        selection_rounds=req.selection_rounds,
         status=DriveStatus.ACTIVE
     )
     session.add(drive)
@@ -244,17 +277,13 @@ async def apply_to_drive(
         session.add(student)
         session.commit()
 
-    # Check eligibility
-    if student.cgpa < drive.min_cgpa:
+    # Check eligibility using centralized rule-based engine
+    dept_code, _ = get_department_details(session, student.department_id)
+    eligibility = evaluate_drive_eligibility(student, dept_code, drive)
+    if not eligibility["is_eligible"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Ineligible: Minimum CGPA required is {drive.min_cgpa}, your CGPA is {student.cgpa}"
-        )
-
-    if student.standing_arrears > drive.max_arrears:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Ineligible: Maximum standing arrears allowed is {drive.max_arrears}, you have {student.standing_arrears}"
+            detail=f"Ineligible: {'; '.join(eligibility['reasons'])}"
         )
 
     # Check existing application

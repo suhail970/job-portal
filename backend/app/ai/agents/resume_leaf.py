@@ -29,8 +29,58 @@ DEPARTMENT_PATTERNS = [
     ("AIML", [r"\bartificial\s+intelligence\s*(?:and|&)\s*machine\s+learning\b", r"\baiml\b"]),
 ]
 
-SCHOOL_LINE_MARKERS = ("10th", "12th", "sslc", "hsc", "secondary", "high school", "matric", "cbse", "icse", "class x", "class xii")
+SCHOOL_LINE_MARKERS = ("10th", "12th", "sslc", "hsc", "secondary", "high school", "matric", "cbse", "icse", "class x", "class xii", "diploma", "polytechnic", "intermediate")
 HIGHER_ED_MARKERS = ("b.e", "b.tech", "bachelor", "degree", "university", "college", "cgpa", "sgpa", "gpa", "semester", "engineering")
+
+
+def _extract_percentage_from_line(line: str, label: str, warnings: List[str]) -> Optional[float]:
+    pct_match = re.search(r"\b(\d{2,3}(?:\.\d{1,2})?)\s*%", line)
+    if pct_match:
+        val = float(pct_match.group(1))
+        if 35.0 <= val <= 100.0:
+            return round(val, 2)
+    # Fallback: "Marks: 91.5" or "Score: 88.2" or "10.0 CGPA" on an explicit school line
+    gpa_match = re.search(r"(?i)\b(\d{1,2}(?:\.\d{1,2})?)\s*(?:/\s*10(?:\.0+)?|\s*cgpa)\b", line)
+    if gpa_match:
+        gpa_val = float(gpa_match.group(1))
+        if 3.5 <= gpa_val <= 10.0:
+            est = round(min(100.0, gpa_val * 9.5), 2)
+            warnings.append(f"Estimated {label} {est}% from CGPA {gpa_val}/10; please verify.")
+            return est
+    score_match = re.search(r"(?i)(?:percentage|pct|marks|score|aggregate)\s*(?:[:=\-]|of|is)?\s*(\d{2}(?:\.\d{1,2})?)\b", line)
+    if score_match:
+        val = float(score_match.group(1))
+        if 35.0 <= val <= 100.0:
+            return round(val, 2)
+    return None
+
+
+def _extract_school_percentages(lines: List[str], warnings: List[str]) -> tuple[Optional[float], Optional[float], str]:
+    tenth_pct: Optional[float] = None
+    twelfth_pct: Optional[float] = None
+    qual_type: str = "HSC"
+
+    re_12th = re.compile(r"(?i)\b(12th|hsc|class\s*xii|higher\s+secondary|intermediate|plus\s*two|\+2)\b")
+    re_diploma = re.compile(r"(?i)\b(diploma|polytechnic)\b")
+    re_10th = re.compile(r"(?i)\b(10th|sslc|class\s*x(?!i)|matric(?:ulation)?|secondary\s+school)\b")
+
+    for line in lines:
+        if tenth_pct is None and re_10th.search(line):
+            val = _extract_percentage_from_line(line, "10th %", warnings)
+            if val is not None:
+                tenth_pct = val
+        if twelfth_pct is None and re_diploma.search(line):
+            val = _extract_percentage_from_line(line, "Diploma %", warnings)
+            if val is not None:
+                twelfth_pct = val
+                qual_type = "DIPLOMA"
+        elif twelfth_pct is None and re_12th.search(line):
+            val = _extract_percentage_from_line(line, "12th (HSC) %", warnings)
+            if val is not None:
+                twelfth_pct = val
+                qual_type = "HSC"
+
+    return tenth_pct, twelfth_pct, qual_type
 
 
 def _extract_cgpa_and_warnings(lines: List[str], warnings: List[str]) -> Optional[float]:
@@ -84,6 +134,7 @@ def extract_academic_and_contact_fields(raw_text: str) -> Dict[str, Any]:
     warnings: List[str] = []
 
     cgpa = _extract_cgpa_and_warnings(lines, warnings)
+    tenth_percentage, twelfth_percentage, secondary_qualification_type = _extract_school_percentages(lines, warnings)
 
     # Graduation Year (prefer education lines / date ranges like 2022 - 2026)
     grad_year: Optional[int] = None
@@ -138,16 +189,20 @@ def extract_academic_and_contact_fields(raw_text: str) -> Dict[str, Any]:
         if handle:
             linkedin_url = f"https://www.linkedin.com/in/{handle}"
 
-    warnings.append("Standing Arrears are not auto-filled from resumes; please confirm your arrears count manually.")
+    warnings.append("Standing & History of Arrears are not auto-filled from resumes; please confirm them manually.")
 
     return {
         "cgpa": cgpa,
+        "tenth_percentage": tenth_percentage,
+        "twelfth_percentage": twelfth_percentage,
+        "secondary_qualification_type": secondary_qualification_type,
         "graduation_year": grad_year,
         "department_code": department_code,
         "phone_number": phone_number,
         "github_url": github_url,
         "linkedin_url": linkedin_url,
         "standing_arrears": None,
+        "history_arrears": None,
         "warnings": warnings,
     }
 

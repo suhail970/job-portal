@@ -31,6 +31,19 @@ def _apply_extracted_profile(
         if 0.0 < cgpa <= 10.0:
             student.cgpa = cgpa
             applied.append("cgpa")
+    if extracted.get("tenth_percentage") is not None:
+        tenth = float(extracted["tenth_percentage"])
+        if 0.0 <= tenth <= 100.0:
+            student.tenth_percentage = round(tenth, 2)
+            applied.append("tenth_percentage")
+    if extracted.get("twelfth_percentage") is not None:
+        twelfth = float(extracted["twelfth_percentage"])
+        if 0.0 <= twelfth <= 100.0:
+            student.twelfth_percentage = round(twelfth, 2)
+            applied.append("twelfth_percentage")
+    if extracted.get("secondary_qualification_type") in ("HSC", "DIPLOMA"):
+        student.secondary_qualification_type = extracted["secondary_qualification_type"]
+        applied.append("secondary_qualification_type")
     if extracted.get("graduation_year") is not None:
         yr = int(extracted["graduation_year"])
         if 2020 <= yr <= 2032:
@@ -105,12 +118,16 @@ async def upload_resume(
     if len(raw_text.strip()) < 40:
         extracted_academic = {
             "cgpa": None,
+            "tenth_percentage": None,
+            "twelfth_percentage": None,
+            "secondary_qualification_type": "HSC",
             "graduation_year": None,
             "department_code": None,
             "phone_number": None,
             "github_url": None,
             "linkedin_url": None,
             "standing_arrears": None,
+            "history_arrears": None,
             "warnings": [
                 "Could not extract selectable text from this PDF (it may be a scanned image). Please enter your academic fields manually or upload a text-based PDF."
             ],

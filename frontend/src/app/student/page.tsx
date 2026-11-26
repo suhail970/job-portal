@@ -43,9 +43,11 @@ import {
   Power,
   MessageSquare,
   Copy,
-  Upload
+  Upload,
+  XCircle
 } from "lucide-react";
 import { formatJobDescription, getVerificationLinks } from "@/lib/student-utils";
+import EligibilityDashboardCard, { EligibilityDashboardData } from "./components/EligibilityDashboardCard";
 
 export default function StudentPortalPage() {
   const [tab, setTab] = useState<"drives" | "prep_hub" | "interview" | "coding" | "resume" | "settings">("drives");
@@ -205,12 +207,20 @@ ${note}
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [cgpaInput, setCgpaInput] = useState("8.65");
   const [arrearsInput, setArrearsInput] = useState("0");
+  const [historyArrearsInput, setHistoryArrearsInput] = useState("0");
+  const [tenthInput, setTenthInput] = useState("");
+  const [qualTypeInput, setQualTypeInput] = useState<"HSC" | "DIPLOMA">("HSC");
+  const [twelfthInput, setTwelfthInput] = useState("");
   const [graduationYearInput, setGraduationYearInput] = useState("2026");
   const [departmentCodeInput, setDepartmentCodeInput] = useState("CSE");
   const [uploadingResume, setUploadingResume] = useState(false);
   const [resumeExtractPreview, setResumeExtractPreview] = useState<any>(null);
-  const [targetCompanies, setTargetCompanies] = useState("Amazon, Zoho, TCS");
-  const [targetMinCtc, setTargetMinCtc] = useState("8.0 LPA");
+  const [targetCompanies, setTargetCompanies] = useState("");
+  const [targetMinCtc, setTargetMinCtc] = useState("");
+  const [eligibilityData, setEligibilityData] = useState<EligibilityDashboardData | null>(null);
+  const [loadingEligibility, setLoadingEligibility] = useState(false);
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [hydratedProfile, setHydratedProfile] = useState(false);
   const [telegramChatId, setTelegramChatId] = useState("@suresh_kannan");
   const [aiTestResult, setAiTestResult] = useState<any>(null);
   const [testingAi, setTestingAi] = useState(false);
@@ -248,6 +258,58 @@ ${note}
     loadInitialData();
   }, []);
 
+  // Real-time rule-based eligibility preview while editing academic metrics
+  useEffect(() => {
+    if (!hydratedProfile || tab !== "settings") return;
+    const parsedStanding = parseInt(arrearsInput || "0", 10);
+    const parsedHistory = parseInt(historyArrearsInput || "0", 10);
+    if (Number.isFinite(parsedStanding) && Number.isFinite(parsedHistory) && parsedHistory < parsedStanding) {
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setLoadingEligibility(true);
+      try {
+        const parsedCgpa = parseFloat(cgpaInput);
+        const parsedTenth = parseFloat(tenthInput);
+        const parsedTwelfth = parseFloat(twelfthInput);
+        const parsedCtc = parseFloat(targetMinCtc);
+
+        const preview = await api.previewEligibility({
+          cgpa: Number.isFinite(parsedCgpa) ? parsedCgpa : undefined,
+          standing_arrears: Number.isFinite(parsedStanding) ? parsedStanding : undefined,
+          history_arrears: Number.isFinite(parsedHistory) ? parsedHistory : undefined,
+          tenth_percentage: Number.isFinite(parsedTenth) ? parsedTenth : undefined,
+          secondary_qualification_type: qualTypeInput,
+          twelfth_percentage: Number.isFinite(parsedTwelfth) ? parsedTwelfth : undefined,
+          department_code: departmentCodeInput || undefined,
+          target_companies: targetCompanies,
+          target_min_ctc: Number.isFinite(parsedCtc) ? parsedCtc : undefined,
+        });
+        setEligibilityData(preview);
+        setIsPreviewMode(true);
+      } catch {
+        // Ignore transient invalid intermediate keystrokes
+      } finally {
+        setLoadingEligibility(false);
+      }
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [
+    hydratedProfile,
+    tab,
+    cgpaInput,
+    arrearsInput,
+    historyArrearsInput,
+    tenthInput,
+    qualTypeInput,
+    twelfthInput,
+    departmentCodeInput,
+    targetCompanies,
+    targetMinCtc,
+  ]);
+
   const loadInitialData = async () => {
     try {
       // Auto login as demo student if token missing or if token belongs to TPO/Admin
@@ -271,17 +333,31 @@ ${note}
       setProfile(meData);
 
       if (meData?.profile) {
-        if (meData.profile.cgpa) setCgpaInput(String(meData.profile.cgpa));
+        if (meData.profile.cgpa !== undefined && meData.profile.cgpa !== null) setCgpaInput(String(meData.profile.cgpa));
         if (meData.profile.standing_arrears !== undefined) setArrearsInput(String(meData.profile.standing_arrears));
+        if (meData.profile.history_arrears !== undefined) setHistoryArrearsInput(String(meData.profile.history_arrears));
+        if (meData.profile.tenth_percentage !== undefined && meData.profile.tenth_percentage !== null) setTenthInput(String(meData.profile.tenth_percentage));
+        if (meData.profile.secondary_qualification_type === "DIPLOMA" || meData.profile.secondary_qualification_type === "HSC") {
+          setQualTypeInput(meData.profile.secondary_qualification_type);
+        }
+        if (meData.profile.twelfth_percentage !== undefined && meData.profile.twelfth_percentage !== null) setTwelfthInput(String(meData.profile.twelfth_percentage));
         if (meData.profile.graduation_year) setGraduationYearInput(String(meData.profile.graduation_year));
         if (meData.profile.telegram_chat_id) setTelegramChatId(meData.profile.telegram_chat_id);
         if (meData.profile.phone_number) setApplyPhone(meData.profile.phone_number);
         if (meData.profile.github_url) setApplyGithub(meData.profile.github_url);
         if (meData.profile.linkedin_url) setApplyLinkedin(meData.profile.linkedin_url);
+        if (meData.profile.target_companies) setTargetCompanies(meData.profile.target_companies);
+        if (meData.profile.target_min_ctc !== undefined && meData.profile.target_min_ctc !== null) setTargetMinCtc(String(meData.profile.target_min_ctc));
       }
       if (meData?.department_code) {
         setDepartmentCodeInput(meData.department_code);
       }
+      try {
+        const eligRes = await api.getMyEligibility();
+        setEligibilityData(eligRes);
+        setIsPreviewMode(false);
+      } catch {}
+      setHydratedProfile(true);
 
       // Restore saved custom BYOK AI configuration
       const savedAi = getCustomAiConfig();
@@ -625,6 +701,18 @@ ${note}
         setCgpaInput(String(ext.cgpa));
         foundFields.push(`CGPA: ${ext.cgpa}`);
       }
+      if (ext.tenth_percentage !== null && ext.tenth_percentage !== undefined) {
+        setTenthInput(String(ext.tenth_percentage));
+        foundFields.push(`10th: ${ext.tenth_percentage}%`);
+      }
+      if (ext.secondary_qualification_type === "DIPLOMA" || ext.secondary_qualification_type === "HSC") {
+        setQualTypeInput(ext.secondary_qualification_type);
+      }
+      if (ext.twelfth_percentage !== null && ext.twelfth_percentage !== undefined) {
+        setTwelfthInput(String(ext.twelfth_percentage));
+        const qLbl = ext.secondary_qualification_type === "DIPLOMA" ? "Diploma" : "12th";
+        foundFields.push(`${qLbl}: ${ext.twelfth_percentage}%`);
+      }
       if (ext.graduation_year) {
         setGraduationYearInput(String(ext.graduation_year));
         foundFields.push(`Batch: ${ext.graduation_year}`);
@@ -673,22 +761,36 @@ ${note}
 
       const parsedCgpa = parseFloat(cgpaInput);
       const parsedArrears = parseInt(arrearsInput, 10);
+      const parsedHistoryArrears = parseInt(historyArrearsInput, 10);
+      const parsedTenth = parseFloat(tenthInput);
+      const parsedTwelfth = parseFloat(twelfthInput);
       const parsedGradYear = parseInt(graduationYearInput, 10);
+      const parsedMinCtc = parseFloat(targetMinCtc);
 
-      await api.updateStudentProfile({
+      const updateRes = await api.updateStudentProfile({
         cgpa: Number.isFinite(parsedCgpa) ? parsedCgpa : undefined,
         standing_arrears: Number.isFinite(parsedArrears) ? parsedArrears : undefined,
+        history_arrears: Number.isFinite(parsedHistoryArrears) ? parsedHistoryArrears : undefined,
+        tenth_percentage: Number.isFinite(parsedTenth) ? parsedTenth : undefined,
+        secondary_qualification_type: qualTypeInput,
+        twelfth_percentage: Number.isFinite(parsedTwelfth) ? parsedTwelfth : undefined,
         graduation_year: Number.isFinite(parsedGradYear) ? parsedGradYear : undefined,
         department_code: departmentCodeInput || undefined,
         phone_number: applyPhone || undefined,
         github_url: applyGithub || undefined,
         linkedin_url: applyLinkedin || undefined,
         telegram_chat_id: telegramChatId,
+        target_companies: targetCompanies,
+        target_min_ctc: Number.isFinite(parsedMinCtc) ? parsedMinCtc : undefined,
       });
+      if (updateRes?.eligibility) {
+        setEligibilityData(updateRes.eligibility);
+      }
+      setIsPreviewMode(false);
       const meData = await api.getMe();
       setProfile(meData);
       setResumeExtractPreview(null);
-      setMsg("Settings, Academic Profile, and AI Configuration saved successfully!");
+      setMsg("Settings, Smart Eligibility Profile, and AI Configuration saved permanently!");
       const updatedDrives = await api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined);
       setDrives(updatedDrives);
     } catch (e: any) {
@@ -794,13 +896,24 @@ ${note}
       {/* Student Profile Bar */}
       <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">
               {profile ? profile.full_name : "Student Career Hub"}
             </h1>
-            <span className="text-xs px-2.5 py-0.5 rounded-full font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-              Eligible
-            </span>
+            {eligibilityData ? (
+              <button
+                type="button"
+                onClick={() => setTab("settings")}
+                className="text-xs px-2.5 py-0.5 rounded-full font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition cursor-pointer"
+                title="View Smart Placement Eligibility Dashboard"
+              >
+                Eligible: {eligibilityData.eligible_count}/{eligibilityData.total_drives} ({eligibilityData.eligibility_percentage}%)
+              </button>
+            ) : (
+              <span className="text-xs px-2.5 py-0.5 rounded-full font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                Placement Portal
+              </span>
+            )}
           </div>
           <p className="text-xs sm:text-sm text-slate-500">
             {profile?.college_name || "Anna University CEG"} • Roll: {profile?.profile?.roll_number || "2022CSE042"} • CGPA:{" "}
@@ -1167,6 +1280,39 @@ ${note}
                       <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
                         {d.salary_package}
                       </span>
+                      {d.eligibility && (
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                            d.eligibility.is_eligible
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "bg-rose-50 text-rose-700 border-rose-200"
+                          }`}
+                          title={d.eligibility.reasons?.join(" | ") || "Meets all drive eligibility rules"}
+                        >
+                          {d.eligibility.is_eligible ? (
+                            <>
+                              <CheckCircle2 className="w-2.5 h-2.5" />
+                              <span>Eligible</span>
+                            </>
+                          ) : (
+                            <>
+                              <XCircle className="w-2.5 h-2.5" />
+                              <span>Not Eligible</span>
+                            </>
+                          )}
+                        </span>
+                      )}
+                      {d.eligibility?.package_goal_match !== null && d.eligibility?.package_goal_match !== undefined && (
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                            d.eligibility.package_goal_match
+                              ? "bg-violet-50 text-violet-700 border-violet-200"
+                              : "bg-amber-50 text-amber-800 border-amber-200"
+                          }`}
+                        >
+                          {d.eligibility.package_goal_match ? "★ Goal CTC" : "Below Goal CTC"}
+                        </span>
+                      )}
                       {isUnseenNew && (
                         <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wide bg-gradient-to-r from-amber-500 to-orange-500 text-white px-2 py-0.5 rounded-full shadow-2xs animate-pulse">
                           <Sparkles className="w-2.5 h-2.5" />
@@ -1245,6 +1391,12 @@ ${note}
                     <span>Min CGPA: <strong className="text-slate-800">{d.min_cgpa}</strong></span>
                     <span>Max Arrears: <strong className="text-slate-800">{d.max_arrears}</strong></span>
                   </div>
+                  {d.eligibility && !d.eligibility.is_eligible && d.eligibility.reasons?.length > 0 && (
+                    <div className="text-[11px] font-medium text-rose-700 bg-rose-50/80 border border-rose-200/70 rounded-lg px-2.5 py-1.5">
+                      {d.eligibility.reasons[0]}
+                      {d.eligibility.reasons.length > 1 ? ` (+${d.eligibility.reasons.length - 1} more)` : ""}
+                    </div>
+                  )}
 
                   <div className="flex items-center gap-2">
                     {d.has_applied ? (
@@ -2167,217 +2319,44 @@ ${note}
               </div>
             </div>
 
-            {/* Setting 3: Academic Profile & Placement Matching */}
-            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Award className="w-5 h-5 text-indigo-600" />
-                  <h3 className="font-bold text-sm text-slate-900">Academic &amp; Eligibility Data</h3>
-                </div>
-                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  Drive Matching
-                </span>
-              </div>
-
-              <p className="text-xs text-slate-500">
-                Upload your PDF resume to auto-fill academic &amp; contact details, or update your metrics manually for campus eligibility checks:
-              </p>
-
-              {/* Upload Resume PDF to Auto-Fill */}
-              <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-0.5">
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-950">
-                    <FileText className="w-4 h-4 text-indigo-600" />
-                    <span>Auto-Fill from Resume (PDF)</span>
-                  </div>
-                  <p className="text-[11px] text-indigo-700">
-                    Extracts CGPA, batch year, branch, phone, GitHub &amp; LinkedIn cleanly for review before saving.
-                  </p>
-                </div>
-                <label
-                  htmlFor="academic-resume-upload"
-                  className={`px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0 transition shadow-sm cursor-pointer ${
-                    uploadingResume
-                      ? "bg-indigo-300 text-white cursor-wait"
-                      : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                  }`}
-                >
-                  {uploadingResume ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Reading PDF...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Upload PDF</span>
-                    </>
-                  )}
-                  <input
-                    id="academic-resume-upload"
-                    type="file"
-                    accept=".pdf,application/pdf"
-                    disabled={uploadingResume}
-                    onChange={handleResumeUploadForAcademic}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-
-              {/* Extracted Data Review Banner */}
-              {resumeExtractPreview && (
-                <div className="p-3.5 rounded-xl bg-emerald-50/80 border border-emerald-200 space-y-2 text-xs">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="font-bold text-emerald-900 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                      <span>Extracted from {resumeExtractPreview.filename}</span>
-                    </span>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white text-emerald-700 border border-emerald-200">
-                      ATS Score: {Math.round(resumeExtractPreview.ats_score || 0)}/100
-                    </span>
-                  </div>
-                  {resumeExtractPreview.foundFields?.length > 0 ? (
-                    <div className="flex flex-wrap gap-1.5">
-                      {resumeExtractPreview.foundFields.map((tag: string, i: number) => (
-                        <span key={i} className="px-2 py-0.5 rounded-md bg-white border border-emerald-200 text-emerald-800 text-[11px] font-semibold">
-                          ✓ {tag}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-amber-800">No academic fields were matched automatically in this file.</p>
-                  )}
-                  {resumeExtractPreview.warnings?.length > 0 && (
-                    <ul className="space-y-0.5 text-[11px] text-amber-800 list-disc list-inside">
-                      {resumeExtractPreview.warnings.map((w: string, i: number) => (
-                        <li key={i}>{w}</li>
-                      ))}
-                    </ul>
-                  )}
-                  <div className="pt-1 flex items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setResumeExtractPreview(null)}
-                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-slate-600 font-semibold text-[11px] cursor-pointer"
-                    >
-                      Dismiss
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSaveProfileSettings}
-                      disabled={savingSettings}
-                      className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                    >
-                      <Save className="w-3 h-3" />
-                      <span>{savingSettings ? "Saving..." : "Confirm & Save Academic Data"}</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="font-semibold text-slate-700">Cumulative GPA (CGPA)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max="10"
-                    value={cgpaInput}
-                    onChange={(e) => setCgpaInput(e.target.value)}
-                    className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-semibold text-slate-700">Standing Arrears (Backlogs)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={arrearsInput}
-                    onChange={(e) => setArrearsInput(e.target.value)}
-                    className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-semibold text-slate-700">Graduation Year</label>
-                  <input
-                    type="number"
-                    min="2020"
-                    max="2035"
-                    value={graduationYearInput}
-                    onChange={(e) => setGraduationYearInput(e.target.value)}
-                    className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-semibold text-slate-700">Department / Branch</label>
-                  <select
-                    value={departmentCodeInput}
-                    onChange={(e) => setDepartmentCodeInput(e.target.value)}
-                    className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold bg-white"
-                  >
-                    {["CSE", "IT", "ECE", "EEE", "MECH", "CIVIL", "AIDS", "AIML"].map((dept) => (
-                      <option key={dept} value={dept}>{dept}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-                <div>
-                  <label className="font-semibold text-slate-700">Phone Number</label>
-                  <input
-                    type="text"
-                    value={applyPhone}
-                    onChange={(e) => setApplyPhone(e.target.value)}
-                    placeholder="+91 98765 43210"
-                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="font-semibold text-slate-700">GitHub URL</label>
-                  <input
-                    type="text"
-                    value={applyGithub}
-                    onChange={(e) => setApplyGithub(e.target.value)}
-                    placeholder="https://github.com/..."
-                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="font-semibold text-slate-700">LinkedIn URL</label>
-                  <input
-                    type="text"
-                    value={applyLinkedin}
-                    onChange={(e) => setApplyLinkedin(e.target.value)}
-                    placeholder="https://linkedin.com/in/..."
-                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="text-xs space-y-1">
-                <label className="font-semibold text-slate-700">Target Dream Recruiters</label>
-                <input
-                  type="text"
-                  value={targetCompanies}
-                  onChange={(e) => setTargetCompanies(e.target.value)}
-                  placeholder="e.g. Amazon, Zoho, TCS, Microsoft"
-                  className="w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div className="text-xs space-y-1">
-                <label className="font-semibold text-slate-700">Target Package (Minimum CTC)</label>
-                <input
-                  type="text"
-                  value={targetMinCtc}
-                  onChange={(e) => setTargetMinCtc(e.target.value)}
-                  placeholder="e.g. 8.5 LPA"
-                  className="w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-            </div>
+            {/* Setting 3: Smart Placement Eligibility System */}
+            <EligibilityDashboardCard
+              tenthInput={tenthInput}
+              setTenthInput={setTenthInput}
+              qualTypeInput={qualTypeInput}
+              setQualTypeInput={setQualTypeInput}
+              twelfthInput={twelfthInput}
+              setTwelfthInput={setTwelfthInput}
+              cgpaInput={cgpaInput}
+              setCgpaInput={setCgpaInput}
+              arrearsInput={arrearsInput}
+              setArrearsInput={setArrearsInput}
+              historyArrearsInput={historyArrearsInput}
+              setHistoryArrearsInput={setHistoryArrearsInput}
+              graduationYearInput={graduationYearInput}
+              setGraduationYearInput={setGraduationYearInput}
+              departmentCodeInput={departmentCodeInput}
+              setDepartmentCodeInput={setDepartmentCodeInput}
+              applyPhone={applyPhone}
+              setApplyPhone={setApplyPhone}
+              applyGithub={applyGithub}
+              setApplyGithub={setApplyGithub}
+              applyLinkedin={applyLinkedin}
+              setApplyLinkedin={setApplyLinkedin}
+              targetCompanies={targetCompanies}
+              setTargetCompanies={setTargetCompanies}
+              targetMinCtc={targetMinCtc}
+              setTargetMinCtc={setTargetMinCtc}
+              uploadingResume={uploadingResume}
+              onResumeUpload={handleResumeUploadForAcademic}
+              resumeExtractPreview={resumeExtractPreview}
+              onDismissResumePreview={() => setResumeExtractPreview(null)}
+              savingSettings={savingSettings}
+              onSaveProfile={handleSaveProfileSettings}
+              eligibilityData={eligibilityData}
+              loadingEligibility={loadingEligibility}
+              isPreviewMode={isPreviewMode}
+            />
 
             {/* Setting 4: Telegram Live Alerts */}
             <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
@@ -2523,18 +2502,37 @@ ${note}
 
                   {/* Eligibility Checker Card */}
                   <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                    <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                      <span>Academic Eligibility Criteria</span>
-                    </h4>
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                        <span>Academic Eligibility Criteria</span>
+                      </h4>
+                      {selectedDriveForModal.eligibility && (
+                        <span
+                          className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
+                            selectedDriveForModal.eligibility.is_eligible
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "bg-rose-50 text-rose-700 border-rose-200"
+                          }`}
+                        >
+                          {selectedDriveForModal.eligibility.is_eligible ? "✓ Eligible to Apply" : "✕ Not Eligible"}
+                        </span>
+                      )}
+                    </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                       <div className="p-2.5 rounded-xl bg-white border border-slate-200">
                         <span className="text-slate-400 block text-[11px]">Minimum CGPA</span>
                         <div className="flex items-center justify-between mt-1">
                           <span className="font-bold text-slate-900">{selectedDriveForModal.min_cgpa}</span>
-                          <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
-                            Your: {profile?.profile?.cgpa || 8.65} ✓
+                          <span
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                              (profile?.profile?.cgpa ?? 0) >= selectedDriveForModal.min_cgpa
+                                ? "text-emerald-600 bg-emerald-50"
+                                : "text-rose-600 bg-rose-50"
+                            }`}
+                          >
+                            Your: {profile?.profile?.cgpa ?? "-"}
                           </span>
                         </div>
                       </div>
@@ -2543,8 +2541,14 @@ ${note}
                         <span className="text-slate-400 block text-[11px]">Max Standing Arrears</span>
                         <div className="flex items-center justify-between mt-1">
                           <span className="font-bold text-slate-900">{selectedDriveForModal.max_arrears}</span>
-                          <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
-                            Your: {profile?.profile?.standing_arrears ?? 0} ✓
+                          <span
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                              (profile?.profile?.standing_arrears ?? 0) <= selectedDriveForModal.max_arrears
+                                ? "text-emerald-600 bg-emerald-50"
+                                : "text-rose-600 bg-rose-50"
+                            }`}
+                          >
+                            Your: {profile?.profile?.standing_arrears ?? 0}
                           </span>
                         </div>
                       </div>
@@ -2556,6 +2560,17 @@ ${note}
                         </span>
                       </div>
                     </div>
+
+                    {selectedDriveForModal.eligibility && !selectedDriveForModal.eligibility.is_eligible && selectedDriveForModal.eligibility.reasons?.length > 0 && (
+                      <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 space-y-1">
+                        {selectedDriveForModal.eligibility.reasons.map((r: string, i: number) => (
+                          <p key={i} className="text-xs font-semibold text-rose-800 flex items-center gap-1.5">
+                            <XCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                            <span>{r}</span>
+                          </p>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Selection Process / Rounds */}

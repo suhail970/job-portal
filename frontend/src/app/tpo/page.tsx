@@ -74,6 +74,10 @@ export default function TpoPortalPage() {
   const [salaryPackage, setSalaryPackage] = useState("8.5 LPA");
   const [minCgpa, setMinCgpa] = useState("7.0");
   const [maxArrears, setMaxArrears] = useState("0");
+  const [maxHistoryArrears, setMaxHistoryArrears] = useState("");
+  const [minTenthPct, setMinTenthPct] = useState("");
+  const [minTwelfthPct, setMinTwelfthPct] = useState("");
+  const [acceptsDiploma, setAcceptsDiploma] = useState(true);
   const [allowedDepts, setAllowedDepts] = useState("CSE,IT,ECE");
 
   useEffect(() => {
@@ -138,7 +142,7 @@ export default function TpoPortalPage() {
       const driveDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
       const regDeadline = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000);
 
-      await api.createDrive({
+      const payload: any = {
         company_name: companyName,
         role_title: roleTitle,
         job_description: jobDescription,
@@ -146,9 +150,15 @@ export default function TpoPortalPage() {
         min_cgpa: parseFloat(minCgpa),
         max_arrears: parseInt(maxArrears),
         allowed_departments: allowedDepts,
+        accepts_diploma: acceptsDiploma,
         drive_date: driveDate.toISOString(),
         registration_deadline: regDeadline.toISOString()
-      });
+      };
+      if (maxHistoryArrears.trim() !== "") payload.max_history_arrears = parseInt(maxHistoryArrears, 10);
+      if (minTenthPct.trim() !== "") payload.min_tenth_percentage = parseFloat(minTenthPct);
+      if (minTwelfthPct.trim() !== "") payload.min_twelfth_percentage = parseFloat(minTwelfthPct);
+
+      await api.createDrive(payload);
 
       setShowCreateModal(false);
       setMsg(`Drive for ${companyName} created successfully!`);
@@ -636,6 +646,68 @@ export default function TpoPortalPage() {
                     className="mt-1 w-full p-2.5 rounded-xl border border-slate-200 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="font-semibold text-slate-700">Min 10th % (opt.)</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    max="100"
+                    placeholder="None"
+                    value={minTenthPct}
+                    onChange={(e) => setMinTenthPct(e.target.value)}
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700">Min 12th/Dip %</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    max="100"
+                    placeholder="None"
+                    value={minTwelfthPct}
+                    onChange={(e) => setMinTwelfthPct(e.target.value)}
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700">Max Hist. Arrears</label>
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="None"
+                    value={maxHistoryArrears}
+                    onChange={(e) => setMaxHistoryArrears(e.target.value)}
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 items-center">
+                <div>
+                  <label className="font-semibold text-slate-700">Eligible Branches</label>
+                  <input
+                    type="text"
+                    value={allowedDepts}
+                    onChange={(e) => setAllowedDepts(e.target.value)}
+                    placeholder="CSE,IT,ECE"
+                    className="mt-1 w-full p-2 rounded-xl border border-slate-200 focus:outline-none"
+                  />
+                </div>
+                <label className="flex items-center gap-2 pt-4 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={acceptsDiploma}
+                    onChange={(e) => setAcceptsDiploma(e.target.checked)}
+                    className="rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                  />
+                  <span className="font-semibold text-slate-700">Accepts Diploma Students</span>
+                </label>
               </div>
 
               <div>
