@@ -9,6 +9,10 @@ Analyze the provided student resume text. Extract technical skills, tools, frame
 Respond strictly in valid JSON format:
 {
     "skills": ["Skill1", "Skill2", ...],
+    "internships": ["Role @ Company - key work", ...],
+    "projects": ["Project Title - tech & outcome", ...],
+    "certifications": ["Certification Name", ...],
+    "achievements": ["Award / Hackathon / Coding Achievement", ...],
     "ats_score": 85.0,
     "summary": "Brief summary of candidate's technical profile",
     "strengths": ["Strength 1", "Strength 2", "Strength 3"],
@@ -207,18 +211,172 @@ def extract_academic_and_contact_fields(raw_text: str) -> Dict[str, Any]:
     }
 
 
+SKILL_TAXONOMY: List[tuple[str, str]] = [
+    ("Python", r"\bpython\b"),
+    ("Java", r"\bjava\b(?!script)"),
+    ("C++", r"(?:c\+\+|cpp)"),
+    ("C", r"(?<![a-zA-Z0-9+])c(?![a-zA-Z0-9+#])"),
+    ("C#", r"\bc#"),
+    ("JavaScript", r"\b(?:javascript|js)\b"),
+    ("TypeScript", r"\b(?:typescript|ts)\b"),
+    ("Golang", r"\b(?:golang|go)\b"),
+    ("Rust", r"\brust\b"),
+    ("Kotlin", r"\bkotlin\b"),
+    ("React", r"\b(?:react\.?js|react)\b"),
+    ("Next.js", r"\bnext\.?js\b"),
+    ("Angular", r"\bangular\b"),
+    ("Vue.js", r"\bvue\.?js\b"),
+    ("Node.js", r"\bnode\.?js\b"),
+    ("Express.js", r"\bexpress\.?js\b"),
+    ("FastAPI", r"\bfastapi\b"),
+    ("Django", r"\bdjango\b"),
+    ("Flask", r"\bflask\b"),
+    ("Spring Boot", r"\bspring\s*boot\b"),
+    ("Tailwind CSS", r"\btailwind(?:\s*css)?\b"),
+    ("HTML/CSS", r"\b(?:html5?|css3?)\b"),
+    ("SQL", r"\bsql\b"),
+    ("PostgreSQL", r"\bpostgres(?:ql)?\b"),
+    ("MySQL", r"\bmysql\b"),
+    ("MongoDB", r"\bmongodb\b"),
+    ("Redis", r"\bredis\b"),
+    ("Docker", r"\bdocker\b"),
+    ("Kubernetes", r"\b(?:kubernetes|k8s)\b"),
+    ("AWS", r"\b(?:aws|amazon\s+web\s+services)\b"),
+    ("Azure", r"\bazure\b"),
+    ("GCP", r"\b(?:gcp|google\s+cloud)\b"),
+    ("Git", r"\b(?:git|github|gitlab)\b"),
+    ("Linux", r"\blinux\b"),
+    ("Embedded Linux", r"\bembedded\s+linux\b"),
+    ("Embedded Systems", r"\b(?:embedded(?:\s+systems?)?|autosar|microcontrollers?|iot)\b"),
+    ("Machine Learning", r"\b(?:machine\s+learning|ml)\b"),
+    ("Deep Learning", r"\b(?:deep\s+learning|neural\s+networks?)\b"),
+    ("TensorFlow", r"\btensorflow\b"),
+    ("PyTorch", r"\bpytorch\b"),
+    ("Generative AI", r"\b(?:generative\s+ai|genai|llm|langchain|rag)\b"),
+    ("Data Structures & Algorithms", r"\b(?:data\s+structures|algorithms|dsa)\b"),
+    ("OOP", r"\b(?:oop|oops|object[\s-]+oriented)\b"),
+    ("System Design", r"\bsystem\s+design\b"),
+    ("Microservices", r"\bmicroservices?\b"),
+    ("REST API", r"\b(?:rest(?:ful)?\s*apis?)\b"),
+    ("GraphQL", r"\bgraphql\b"),
+    ("CI/CD", r"\b(?:ci/cd|github\s+actions|jenkins)\b"),
+    ("Selenium", r"\bselenium\b"),
+    ("Playwright", r"\bplaywright\b"),
+    ("Power BI", r"\bpower\s*bi\b"),
+    ("Tableau", r"\btableau\b"),
+    ("Data Analytics", r"\b(?:data\s+analytics?|pandas|numpy|scikit-learn)\b"),
+]
+
+_SECTION_HEADERS = {
+    "internships": re.compile(r"^(?:internships?|work\s+experience|experience|employment|industrial\s+training)\b[:\-]*$", re.IGNORECASE),
+    "projects": re.compile(r"^(?:(?:academic|personal|key|major|software)\s+)?projects?\b[:\-]*$", re.IGNORECASE),
+    "certifications": re.compile(r"^(?:certifications?|certificates?|licenses?\s*(?:&|and)?\s*certifications?|courses?)\b[:\-]*$", re.IGNORECASE),
+    "achievements": re.compile(r"^(?:achievements?|awards?|honors?|accomplishments?|extracurriculars?|hackathons?|publications?)\b[:\-]*$", re.IGNORECASE),
+}
+_OTHER_HEADER_RE = re.compile(
+    r"^(?:education|academic(?:\s+details|\s+background)?|skills|technical\s+skills|core\s+competencies|summary|profile|objective|contact|languages?|references?|declaration)\b[:\-]*$",
+    re.IGNORECASE,
+)
+
+
+def extract_structured_resume_sections(raw_text: str) -> Dict[str, List[str]]:
+    """
+    Deterministically extracts grounded skills, internships, projects, certifications,
+    and achievements from resume text without hallucination or dummy placeholders.
+    """
+    text = raw_text or ""
+    text_lower = text.lower()
+
+    skills: List[str] = []
+    for canonical, pat in SKILL_TAXONOMY:
+        if re.search(pat, text_lower, re.IGNORECASE):
+            skills.append(canonical)
+
+    sections: Dict[str, List[str]] = {
+        "internships": [],
+        "projects": [],
+        "certifications": [],
+        "achievements": [],
+    }
+
+    current_section: Optional[str] = None
+    for raw_ln in text.splitlines():
+        line = raw_ln.strip()
+        if not line:
+            continue
+
+        clean_heading = re.sub(r"[:|\-]+$", "", line).strip()
+        matched_heading = None
+        if len(clean_heading.split()) <= 5:
+            for sec_key, sec_re in _SECTION_HEADERS.items():
+                if sec_re.match(clean_heading):
+                    matched_heading = sec_key
+                    break
+            if not matched_heading and _OTHER_HEADER_RE.match(clean_heading):
+                current_section = None
+                continue
+
+        if matched_heading:
+            current_section = matched_heading
+            continue
+
+        if current_section:
+            cleaned_item = re.sub(r"^[\u2022\u25cf\u25aa\-\*\d\.)\s]+", "", line).strip()
+            if len(cleaned_item) >= 5 and len(sections[current_section]) < 12:
+                sections[current_section].append(cleaned_item[:220])
+
+    # Fallback inline mentions if no formal section headers existed (common in compact PDFs)
+    if not sections["internships"]:
+        for ln in text.splitlines():
+            s = ln.strip()
+            if re.search(r"\bintern(?:ship)?\b", s, re.IGNORECASE) and len(s) >= 8 and len(sections["internships"]) < 5:
+                sections["internships"].append(re.sub(r"^[\u2022\-\*\s]+", "", s)[:220])
+    if not sections["certifications"]:
+        for ln in text.splitlines():
+            s = ln.strip()
+            if re.search(r"\b(?:certified|certification|certificate|aws\s+certified|oracle\s+certified|nptel|coursera)\b", s, re.IGNORECASE) and len(s) >= 8 and len(sections["certifications"]) < 5:
+                sections["certifications"].append(re.sub(r"^[\u2022\-\*\s]+", "", s)[:220])
+
+    return {
+        "skills": skills,
+        "internships": sections["internships"],
+        "projects": sections["projects"],
+        "certifications": sections["certifications"],
+        "achievements": sections["achievements"],
+    }
+
+
+def _compute_deterministic_ats_score(structured: Dict[str, List[str]], academic: Dict[str, Any], raw_text: str) -> float:
+    score = 35.0
+    score += min(30.0, len(structured.get("skills", [])) * 4.0)
+    if structured.get("projects"):
+        score += min(12.0, len(structured["projects"]) * 4.0)
+    if structured.get("internships"):
+        score += min(10.0, len(structured["internships"]) * 5.0)
+    if structured.get("certifications") or structured.get("achievements"):
+        score += 5.0
+    if academic.get("cgpa"):
+        score += 4.0
+    if academic.get("github_url") or academic.get("linkedin_url"):
+        score += 4.0
+    if len((raw_text or "").strip()) < 100:
+        score = min(score, 45.0)
+    return round(min(98.0, score), 1)
+
+
 async def parse_resume_text(
     raw_text: str,
     preferred_provider: str = None,
     custom_config: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
     academic_profile = extract_academic_and_contact_fields(raw_text)
+    structured = extract_structured_resume_sections(raw_text)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Here is the candidate's resume text:\n\n{raw_text[:6000]}"}
     ]
-    
+
     response_str = await ai_router.generate_completion(
         messages=messages,
         temperature=0.2,
@@ -227,38 +385,116 @@ async def parse_resume_text(
         json_mode=True
     )
 
+    ai_data: Dict[str, Any] = {}
     try:
-        data = json.loads(response_str)
+        parsed_json = json.loads(response_str)
+        if isinstance(parsed_json, dict):
+            ai_data = parsed_json
     except Exception:
-        data = {
-            "skills": ["Python", "JavaScript", "SQL", "Git", "Data Structures"],
-            "ats_score": 78.0,
-            "summary": "Engineering graduate with solid computer science fundamentals.",
-            "strengths": ["Good foundation in programming", "Relevant academic projects"],
-            "improvements": ["Quantify project impact metrics", "Highlight problem solving achievements"]
-        }
+        ai_data = {}
 
-    # Safely backfill only missing regex fields when AI returned valid bounded values
-    if academic_profile["cgpa"] is None and data.get("cgpa") is not None:
-        try:
-            ai_cgpa = float(data["cgpa"])
-            if 0.0 < ai_cgpa <= 10.0:
-                academic_profile["cgpa"] = round(ai_cgpa, 2)
-        except (TypeError, ValueError):
-            pass
+    # Detect ai_router's static zero-key dummy fallback signature so dummy skills never pollute real resumes
+    _DUMMY_SIGNATURES = {
+        ("Python", "FastAPI", "SQL", "Machine Learning", "Data Structures", "Next.js", "Docker", "Git"),
+    }
+    ai_skills = ai_data.get("skills") if isinstance(ai_data.get("skills"), list) else []
+    is_static_fallback = tuple(ai_skills) in _DUMMY_SIGNATURES and "fastapi" not in (raw_text or "").lower()
 
-    if academic_profile["graduation_year"] is None and data.get("graduation_year") is not None:
-        try:
-            ai_yr = int(data["graduation_year"])
-            if 2020 <= ai_yr <= 2032:
-                academic_profile["graduation_year"] = ai_yr
-        except (TypeError, ValueError):
-            pass
+    # Combine deterministic grounded skills with verified AI skills (if not dummy fallback)
+    merged_skills: List[str] = list(structured["skills"])
+    if not is_static_fallback:
+        existing_lower = {s.lower() for s in merged_skills}
+        for s in ai_skills:
+            if isinstance(s, str) and s.strip() and s.strip().lower() not in existing_lower:
+                merged_skills.append(s.strip())
+                existing_lower.add(s.strip().lower())
 
-    if academic_profile["department_code"] is None and isinstance(data.get("department_code"), str):
-        code_up = data["department_code"].strip().upper()
-        if code_up in {"CSE", "IT", "ECE", "EEE", "MECH", "CIVIL", "AIDS", "AIML"}:
-            academic_profile["department_code"] = code_up
+    def _merge_list(det_list: List[str], ai_key: str) -> List[str]:
+        out = list(det_list)
+        if not is_static_fallback and isinstance(ai_data.get(ai_key), list):
+            seen = {x.lower() for x in out}
+            for item in ai_data[ai_key]:
+                if isinstance(item, str) and item.strip() and item.strip().lower() not in seen:
+                    out.append(item.strip()[:220])
+                    seen.add(item.strip().lower())
+        return out
+
+    internships = _merge_list(structured["internships"], "internships")
+    projects = _merge_list(structured["projects"], "projects")
+    certifications = _merge_list(structured["certifications"], "certifications")
+    achievements = _merge_list(structured["achievements"], "achievements")
+
+    ats_score = (
+        float(ai_data["ats_score"])
+        if (not is_static_fallback and isinstance(ai_data.get("ats_score"), (int, float)))
+        else _compute_deterministic_ats_score(structured, academic_profile, raw_text)
+    )
+
+    summary = (
+        ai_data.get("summary")
+        if (not is_static_fallback and ai_data.get("summary"))
+        else (
+            f"Candidate profile with {len(merged_skills)} technical skills"
+            + (f" ({', '.join(merged_skills[:5])})" if merged_skills else "")
+            + (f", {len(projects)} project(s)" if projects else "")
+            + (f", and {len(internships)} internship(s)" if internships else "")
+            + "."
+        )
+    )
+
+    data: Dict[str, Any] = {
+        "skills": merged_skills,
+        "internships": internships,
+        "projects": projects,
+        "certifications": certifications,
+        "achievements": achievements,
+        "ats_score": ats_score,
+        "summary": summary,
+        "strengths": (
+            ai_data.get("strengths")
+            if (not is_static_fallback and isinstance(ai_data.get("strengths"), list))
+            else [
+                s for s in [
+                    f"Verified technical stack: {', '.join(merged_skills[:5])}" if merged_skills else None,
+                    f"Hands-on project portfolio ({len(projects)} item(s))" if projects else None,
+                    f"Practical internship experience ({len(internships)} item(s))" if internships else None,
+                ] if s
+            ]
+        ),
+        "improvements": (
+            ai_data.get("improvements")
+            if (not is_static_fallback and isinstance(ai_data.get("improvements"), list))
+            else [
+                tip for tip in [
+                    "Add measurable metrics to project outcomes" if projects else "Add 2-3 technical projects with tech stack tags",
+                    "Include relevant industry certifications or hackathon achievements" if not (certifications or achievements) else None,
+                ] if tip
+            ]
+        ),
+    }
+
+    # Safely backfill only missing regex fields when genuine AI output returned valid bounded values
+    if not is_static_fallback:
+        if academic_profile["cgpa"] is None and ai_data.get("cgpa") is not None:
+            try:
+                ai_cgpa = float(ai_data["cgpa"])
+                if 0.0 < ai_cgpa <= 10.0:
+                    academic_profile["cgpa"] = round(ai_cgpa, 2)
+            except (TypeError, ValueError):
+                pass
+
+        if academic_profile["graduation_year"] is None and ai_data.get("graduation_year") is not None:
+            try:
+                ai_yr = int(ai_data["graduation_year"])
+                if 2020 <= ai_yr <= 2032:
+                    academic_profile["graduation_year"] = ai_yr
+            except (TypeError, ValueError):
+                pass
+
+        if academic_profile["department_code"] is None and isinstance(ai_data.get("department_code"), str):
+            code_up = ai_data["department_code"].strip().upper()
+            if code_up in {"CSE", "IT", "ECE", "EEE", "MECH", "CIVIL", "AIDS", "AIML"}:
+                academic_profile["department_code"] = code_up
 
     data["academic_profile"] = academic_profile
     return data

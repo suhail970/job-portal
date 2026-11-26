@@ -76,9 +76,20 @@ export const api = {
 
   getMe: () => request("/auth/me"),
 
-  // Drives
-  getDrives: (location?: string) =>
-    request(location && location !== "All" ? `/drives?location=${encodeURIComponent(location)}` : "/drives"),
+  // Drives & Resume-Based Job Matching
+  getDrives: (location?: string, matchMode?: "both" | "based_on_resume" | "all") => {
+    const params = new URLSearchParams();
+    if (location && location !== "All") params.set("location", location);
+    if (matchMode) params.set("match_mode", matchMode);
+    const qs = params.toString();
+    return request(`/drives${qs ? `?${qs}` : ""}`);
+  },
+  getMatchedDrives: (matchMode: "both" | "based_on_resume" | "all" = "both", location?: string) => {
+    const params = new URLSearchParams();
+    params.set("match_mode", matchMode);
+    if (location && location !== "All") params.set("location", location);
+    return request(`/drives/matched?${params.toString()}`);
+  },
   getDrive: (id: string) => request(`/drives/${id}`),
   fetchLatestDrives: (location?: string) =>
     request(location && location !== "All" ? `/drives/fetch-latest?location=${encodeURIComponent(location)}` : "/drives/fetch-latest", {
@@ -149,6 +160,10 @@ export const api = {
 
   // Resume
   getMyResume: () => request("/resume/my-resume"),
+  refreshResumeAnalysis: () =>
+    request("/resume/refresh-analysis", {
+      method: "POST",
+    }),
   uploadResume: async (file: File, autoApply: boolean = false) => {
     const token = getToken();
     const formData = new FormData();

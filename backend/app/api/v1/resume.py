@@ -9,7 +9,11 @@ from app.core.database import get_session
 from app.core.tenant import get_current_user, require_roles
 from app.models.entities import Resume, StudentProfile, Department, User
 from app.models.enums import UserRole
-from app.ai.agents.resume_leaf import parse_resume_text, extract_academic_and_contact_fields
+from app.ai.agents.resume_leaf import (
+    parse_resume_text,
+    extract_academic_and_contact_fields,
+    extract_structured_resume_sections,
+)
 
 router = APIRouter(prefix="/resume", tags=["Resume AI"])
 
@@ -134,6 +138,10 @@ async def upload_resume(
         }
         parsed_data = {
             "skills": [],
+            "internships": [],
+            "projects": [],
+            "certifications": [],
+            "achievements": [],
             "ats_score": 0.0,
             "summary": "Unreadable or image-only PDF.",
             "strengths": [],
@@ -154,6 +162,10 @@ async def upload_resume(
         filename=file.filename,
         raw_text=raw_text[:8000],
         parsed_skills=json.dumps(parsed_data.get("skills", [])),
+        parsed_internships=json.dumps(parsed_data.get("internships", [])),
+        parsed_projects=json.dumps(parsed_data.get("projects", [])),
+        parsed_certifications=json.dumps(parsed_data.get("certifications", [])),
+        parsed_achievements=json.dumps(parsed_data.get("achievements", [])),
         ats_score=parsed_data.get("ats_score", 75.0),
         summary=parsed_data.get("summary", "")
     )
@@ -167,6 +179,10 @@ async def upload_resume(
         "filename": resume.filename,
         "ats_score": resume.ats_score,
         "skills": parsed_data.get("skills", []),
+        "internships": parsed_data.get("internships", []),
+        "projects": parsed_data.get("projects", []),
+        "certifications": parsed_data.get("certifications", []),
+        "achievements": parsed_data.get("achievements", []),
         "summary": resume.summary,
         "strengths": parsed_data.get("strengths", []),
         "improvements": parsed_data.get("improvements", []),
@@ -205,11 +221,18 @@ def get_my_resume(
     if not resume:
         return {"has_resume": False}
 
-    skills = []
-    try:
-        skills = json.loads(resume.parsed_skills)
-    except Exception:
-        pass
+    def _safe_json_list(raw_val: Optional[str]) -> List[str]:
+        try:
+            res = json.loads(raw_val or "[]")
+            return res if isinstance(res, list) else []
+        except Exception:
+            return []
+
+    skills = _safe_json_list(resume.parsed_skills)
+    internships = _safe_json_list(getattr(resume, "parsed_internships", "[]"))
+    projects = _safe_json_list(getattr(resume, "parsed_projects", "[]"))
+    certifications = _safe_json_list(getattr(resume, "parsed_certifications", "[]"))
+    achievements = _safe_json_list(getattr(resume, "parsed_achievements", "[]"))
 
     return {
         "has_resume": True,
@@ -217,7 +240,60 @@ def get_my_resume(
         "filename": resume.filename,
         "ats_score": resume.ats_score,
         "skills": skills,
+        "internships": internships,
+        "projects": projects,
+        "certifications": certifications,
+        "achievements": achievements,
         "summary": resume.summary,
         "uploaded_at": resume.uploaded_at
+    }
+
+
+@router.post("/refresh-analysis")
+def refresh_resume_analysis(
+    current_user: User = Depends(require_roles([UserRole.STUDENT, UserRole.JOB_SEEKER])),
+    session: Session = Depends(get_session),
+):
+    """Re-extracts structured sections from the latest uploaded resume text cleanly."""
+    student = session.exec(select(StudentProfile).where(StudentProfile.user_id == current_user.id)).first()
+    student_id = student.id if student else current_user.id
+
+    resume = session.exec(
+        select(Resume).where(Resume.student_id == student_id).order_by(Resume.uploaded_at.desc())
+    ).first()
+    if not resume:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No resume found to refresh")
+
+    structured = extract_structured_resume_sections(resume.raw_text or "")
+    try:
+        existing_skills = json.loads(resume.parsed_skills or "[]")
+    except Exception:
+        existing_skills = []
+
+    merged_skills = list(structured["skills"])
+    seen = {s.lower() for s in merged_skills}
+    for s in existing_skills:
+        if isinstance(s, str) and s.strip() and s.strip().lower() not in seen:
+            merged_skills.append(s.strip())
+            seen.add(s.strip().lower())
+
+    resume.parsed_skills = json.dumps(merged_skills)
+    resume.parsed_internships = json.dumps(structured["internships"])
+    resume.parsed_projects = json.dumps(structured["projects"])
+    resume.parsed_certifications = json.dumps(structured["certifications"])
+    resume.parsed_achievements = json.dumps(structured["achievements"])
+    session.add(resume)
+    session.commit()
+    session.refresh(resume)
+
+    return {
+        "status": "refreshed",
+        "resume_id": resume.id,
+        "filename": resume.filename,
+        "skills": merged_skills,
+        "internships": structured["internships"],
+        "projects": structured["projects"],
+        "certifications": structured["certifications"],
+        "achievements": structured["achievements"],
     }
 

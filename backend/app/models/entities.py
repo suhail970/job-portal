@@ -123,6 +123,10 @@ class Resume(SQLModel, table=True):
     filename: str
     raw_text: str
     parsed_skills: str = Field(default="[]") # JSON list of strings
+    parsed_internships: str = Field(default="[]") # JSON list of strings
+    parsed_projects: str = Field(default="[]") # JSON list of strings
+    parsed_certifications: str = Field(default="[]") # JSON list of strings
+    parsed_achievements: str = Field(default="[]") # JSON list of strings
     ats_score: float = Field(default=75.0) # 0 to 100
     summary: Optional[str] = None
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

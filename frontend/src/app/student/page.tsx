@@ -48,10 +48,22 @@ import {
 } from "lucide-react";
 import { formatJobDescription, getVerificationLinks } from "@/lib/student-utils";
 import EligibilityDashboardCard, { EligibilityDashboardData } from "./components/EligibilityDashboardCard";
+import ResumeMatchControls, { JobMatchMode, ResumeSummaryMeta } from "./components/ResumeMatchControls";
 
 export default function StudentPortalPage() {
   const [tab, setTab] = useState<"drives" | "prep_hub" | "interview" | "coding" | "resume" | "settings">("drives");
   const [drives, setDrives] = useState<any[]>([]);
+  const [matchMode, setMatchMode] = useState<JobMatchMode>("both");
+  const [personalizedDrives, setPersonalizedDrives] = useState<any[]>([]);
+  const [otherDrives, setOtherDrives] = useState<any[]>([]);
+  const [hasResume, setHasResume] = useState(false);
+  const [resumeSummaryMeta, setResumeSummaryMeta] = useState<ResumeSummaryMeta | null>(null);
+  const [matchCounts, setMatchCounts] = useState<{ personalized: number; others: number; total: number }>({
+    personalized: 0,
+    others: 0,
+    total: 0,
+  });
+  const [loadingMatches, setLoadingMatches] = useState(false);
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -368,8 +380,11 @@ ${note}
         if (savedAi.api_key) setAiApiKey(savedAi.api_key);
       }
 
-      const drivesData = await api.getDrives();
-      setDrives(drivesData);
+      const matchedRes = await loadMatchedDrives("both", "All");
+      if (!matchedRes) {
+        const drivesData = await api.getDrives();
+        setDrives(drivesData);
+      }
 
       try {
         const statusData = await api.getCronStatus();
@@ -395,16 +410,52 @@ ${note}
   };
 
   // -------------------------------------------------------------
-  // Drive Application & Location Filtering
+  // Drive Application, Location Filtering & Resume-Based Matching
   // -------------------------------------------------------------
+  const loadMatchedDrives = async (mode: JobMatchMode = matchMode, loc: string = selectedLocation) => {
+    setLoadingMatches(true);
+    try {
+      const res = await api.getMatchedDrives(mode, loc !== "All" ? loc : undefined);
+      setHasResume(Boolean(res?.has_resume));
+      setResumeSummaryMeta(res?.resume_summary || null);
+      const pList = res?.personalized_matches || [];
+      const oList = res?.other_jobs || [];
+      const aList = res?.all_jobs || [];
+      setPersonalizedDrives(pList);
+      setOtherDrives(oList);
+      setMatchCounts(res?.counts || { personalized: pList.length, others: oList.length, total: mode === "all" ? aList.length : pList.length + oList.length });
+      const combined = mode === "all" ? aList : mode === "based_on_resume" ? pList : [...pList, ...oList];
+      setDrives(combined);
+      return combined;
+    } catch (e: any) {
+      console.error("Matched drives error:", e);
+      return null;
+    } finally {
+      setLoadingMatches(false);
+    }
+  };
+
+  const handleChangeMatchMode = async (newMode: JobMatchMode) => {
+    setMatchMode(newMode);
+    await loadMatchedDrives(newMode, selectedLocation);
+  };
+
+  const handleRefreshMatches = async () => {
+    setLoadingMatches(true);
+    try {
+      if (hasResume) {
+        await api.refreshResumeAnalysis().catch(() => null);
+      }
+      await loadMatchedDrives(matchMode, selectedLocation);
+      setMsg("Resume matches refreshed cleanly against all active drives!");
+    } finally {
+      setLoadingMatches(false);
+    }
+  };
+
   const handleSelectLocation = async (loc: string) => {
     setSelectedLocation(loc);
-    try {
-      const filtered = await api.getDrives(loc);
-      setDrives(filtered);
-    } catch (e: any) {
-      console.error("Location filter error:", e);
-    }
+    await loadMatchedDrives(matchMode, loc);
   };
 
   const handleFetchLatestDrives = async (targetCity?: string) => {
@@ -413,8 +464,7 @@ ${note}
     const locToFetch = targetCity || selectedLocation;
     try {
       const res = await api.fetchLatestDrives(locToFetch !== "All" ? locToFetch : undefined);
-      const updatedDrives = await api.getDrives(locToFetch !== "All" ? locToFetch : undefined);
-      setDrives(updatedDrives);
+      const updatedList = await loadMatchedDrives(matchMode, locToFetch);
       try {
         const statusData = await api.getCronStatus();
         setSyncStatus(statusData);
@@ -423,7 +473,7 @@ ${note}
         }
       } catch {}
       const addedCount = res.new_drives_added || 0;
-      const totalCount = updatedDrives.length;
+      const totalCount = updatedList ? updatedList.length : drives.length;
       const locLabel = locToFetch === "All" ? "all tech hubs" : locToFetch;
       if (addedCount > 0) {
         setSyncMsg(`⚡ Successfully fetched & added ${addedCount} brand new drives for ${locLabel} (${res.companies_added?.slice(0, 4).join(", ")}${res.companies_added?.length > 4 ? "..." : ""})! Displaying ${totalCount} active openings.`);
@@ -741,6 +791,8 @@ ${note}
         warnings: ext.warnings || [],
         foundFields,
       });
+      await loadMatchedDrives(matchMode, selectedLocation);
+      setMsg(`Resume "${res.filename || file.name}" parsed and job matches updated!`);
     } catch (err: any) {
       setMsg(`Resume upload failed: ${err.message}`);
     } finally {
@@ -791,8 +843,7 @@ ${note}
       setProfile(meData);
       setResumeExtractPreview(null);
       setMsg("Settings, Smart Eligibility Profile, and AI Configuration saved permanently!");
-      const updatedDrives = await api.getDrives(selectedLocation !== "All" ? selectedLocation : undefined);
-      setDrives(updatedDrives);
+      await loadMatchedDrives(matchMode, selectedLocation);
     } catch (e: any) {
       alert(`Save failed: ${e.message}`);
     } finally {
@@ -889,6 +940,225 @@ ${note}
     } finally {
       setExecutingCode(false);
     }
+  };
+
+  const renderDriveCard = (d: any) => {
+    const isUnseenNew = d.is_new && !seenDriveIds.includes(d.id);
+    const rm = d.resume_match;
+    return (
+      <div
+        key={d.id}
+        className={`bg-white rounded-2xl p-6 border transition-all flex flex-col justify-between space-y-4 relative overflow-hidden ${
+          d.has_applied ? "border-emerald-300 shadow-sm" : "border-slate-200 hover:border-indigo-300 shadow-sm"
+        }`}
+      >
+        {d.has_applied && (
+          <div className="absolute top-0 right-0 bg-emerald-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl flex items-center gap-1 shadow-sm">
+            <CheckCircle2 className="w-3 h-3" />
+            <span>APPLIED {d.match_score ? `• ${d.match_score}% MATCH` : ""}</span>
+          </div>
+        )}
+
+        <div className="space-y-3">
+          <div className="flex items-start justify-between gap-2 pt-0.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
+                {d.salary_package}
+              </span>
+              {rm && (
+                <span
+                  className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    rm.match_percentage >= 70
+                      ? "bg-violet-100 text-violet-800 border-violet-300"
+                      : rm.is_recommended
+                      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                      : "bg-slate-100 text-slate-600 border-slate-200"
+                  }`}
+                  title={rm.reasons?.join(" | ") || "Resume relevance score"}
+                >
+                  <Sparkles className="w-2.5 h-2.5" />
+                  <span>{Math.round(rm.match_percentage)}% Match</span>
+                </span>
+              )}
+              {d.eligibility && (
+                <span
+                  className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    d.eligibility.is_eligible
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : "bg-rose-50 text-rose-700 border-rose-200"
+                  }`}
+                  title={d.eligibility.reasons?.join(" | ") || "Meets all drive eligibility rules"}
+                >
+                  {d.eligibility.is_eligible ? (
+                    <>
+                      <CheckCircle2 className="w-2.5 h-2.5" />
+                      <span>Eligible</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-2.5 h-2.5" />
+                      <span>Not Eligible</span>
+                    </>
+                  )}
+                </span>
+              )}
+              {d.eligibility?.package_goal_match !== null && d.eligibility?.package_goal_match !== undefined && (
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    d.eligibility.package_goal_match
+                      ? "bg-violet-50 text-violet-700 border-violet-200"
+                      : "bg-amber-50 text-amber-800 border-amber-200"
+                  }`}
+                >
+                  {d.eligibility.package_goal_match ? "★ Goal CTC" : "Below Goal CTC"}
+                </span>
+              )}
+              {isUnseenNew && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wide bg-gradient-to-r from-amber-500 to-orange-500 text-white px-2 py-0.5 rounded-full shadow-2xs animate-pulse">
+                  <Sparkles className="w-2.5 h-2.5" />
+                  <span>NEW</span>
+                </span>
+              )}
+            </div>
+            <span className="text-xs font-medium text-slate-500 flex items-center gap-1">
+              <Clock className="w-3 h-3 text-slate-400" />
+              {d.days_remaining !== undefined ? `Drive in ${d.days_remaining}d` : "Upcoming"}
+            </span>
+          </div>
+
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-bold text-lg text-slate-900">{d.company_name}</h3>
+              {d.posted_time_ago && (
+                <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                  {d.posted_time_ago}
+                </span>
+              )}
+            </div>
+            <p className="text-xs font-semibold text-indigo-600">{d.role_title}</p>
+            <p className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
+              <MapPin className="w-3 h-3 text-slate-400" />
+              <span>{d.location || "Pan India / Hybrid"}</span>
+            </p>
+          </div>
+
+          <p className="text-xs text-slate-600 line-clamp-3 leading-relaxed">
+            {formatJobDescription(d.job_description)}
+          </p>
+
+          {/* Resume Match Evidence Preview (Strictly separate from Academic Eligibility) */}
+          {rm && rm.reasons?.length > 0 && (
+            <div className="p-2.5 rounded-xl bg-violet-50/60 border border-violet-200/70 space-y-1.5">
+              <p className="text-[11px] font-semibold text-violet-950">{rm.reasons[0]}</p>
+              {rm.matched_skills?.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {rm.matched_skills.slice(0, 4).map((sk: string, idx: number) => (
+                    <span
+                      key={idx}
+                      className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-white text-violet-800 border border-violet-200"
+                    >
+                      {sk}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* External Links & Portals */}
+          <div className="flex items-center gap-2 flex-wrap pt-1">
+            {d.application_url && (
+              <a
+                href={d.application_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-lg transition ${
+                  d.form_type === "DIRECT_FORM"
+                    ? "text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200"
+                    : "text-violet-700 hover:text-violet-900 bg-violet-50 hover:bg-violet-100 border border-violet-100"
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <ExternalLink className={`w-3 h-3 ${d.form_type === "DIRECT_FORM" ? "text-emerald-600" : "text-violet-600"}`} />
+                <span>{d.form_type === "DIRECT_FORM" ? "Direct Form ↗" : "Corporate Portal ↗"}</span>
+              </a>
+            )}
+            {d.company_website && (
+              <a
+                href={d.company_website}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-lg transition"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Globe className="w-3 h-3 text-slate-500" />
+                <span>Website ↗</span>
+              </a>
+            )}
+          </div>
+
+          {d.selection_rounds && (
+            <div className="text-[10px] text-slate-500 bg-slate-50 p-2 rounded-lg border border-slate-100">
+              <span className="font-semibold text-slate-700">Rounds: </span>
+              <span>{d.selection_rounds}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-3 pt-3 border-t border-slate-100">
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>Min CGPA: <strong className="text-slate-800">{d.min_cgpa}</strong></span>
+            <span>Max Arrears: <strong className="text-slate-800">{d.max_arrears}</strong></span>
+          </div>
+          {d.eligibility && !d.eligibility.is_eligible && d.eligibility.reasons?.length > 0 && (
+            <div className="text-[11px] font-medium text-rose-700 bg-rose-50/80 border border-rose-200/70 rounded-lg px-2.5 py-1.5">
+              {d.eligibility.reasons[0]}
+              {d.eligibility.reasons.length > 1 ? ` (+${d.eligibility.reasons.length - 1} more)` : ""}
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            {d.has_applied ? (
+              <button
+                onClick={() => openDriveModal(d, "details")}
+                className="flex-1 py-2 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold text-xs border border-emerald-200 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>✓ Applied</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => openDriveModal(d, "apply")}
+                className="flex-1 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm shadow-indigo-200"
+              >
+                Apply Now
+              </button>
+            )}
+
+            <button
+              onClick={() => openDriveModal(d, "details")}
+              className="py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+              title="View company details and eligibility"
+            >
+              Details
+            </button>
+
+            <button
+              onClick={() => {
+                setCompanyName(d.company_name);
+                setRoleTitle(d.role_title);
+                setTab("prep_hub");
+              }}
+              className="py-2 px-2.5 rounded-xl bg-violet-50 hover:bg-violet-100 text-violet-700 font-semibold text-xs flex items-center gap-1 transition-colors cursor-pointer"
+              title="Prepare for this company with Placement Hub"
+            >
+              <BrainCircuit className="w-3.5 h-3.5 text-violet-600" />
+              <span>Prep</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -1230,218 +1500,123 @@ ${note}
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-1">
+          {/* Resume-Based Job Matching Controls (3 Modes) */}
+          <ResumeMatchControls
+            matchMode={matchMode}
+            onChangeMode={handleChangeMatchMode}
+            hasResume={hasResume}
+            resumeSummary={resumeSummaryMeta}
+            counts={matchCounts}
+            loadingMatches={loadingMatches}
+            uploadingResume={uploadingResume}
+            onRefreshMatches={handleRefreshMatches}
+            onUploadResume={handleResumeUploadForAcademic}
+          />
+
+          <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
             <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <span>Campus Recruitment Drives {selectedLocation !== "All" ? `in ${selectedLocation}` : ""}</span>
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-semibold border border-indigo-200">
-                {drives.length} drives active
+                {drives.length} drives shown
               </span>
             </h2>
-            <span className="text-xs text-slate-500 font-medium">Auto-matched with your CGPA & branch</span>
+            <span className="text-xs text-slate-500 font-medium">
+              Skill &amp; experience scoring is evaluated independently from academic eligibility
+            </span>
           </div>
 
           {drives.length === 0 && (
             <div className="bg-white rounded-2xl p-8 border border-slate-200 text-center space-y-3">
               <MapPin className="w-8 h-8 text-indigo-400 mx-auto" />
-              <h3 className="font-bold text-slate-800 text-base">No active drives found for {selectedLocation}</h3>
+              <h3 className="font-bold text-slate-800 text-base">
+                {matchMode === "based_on_resume"
+                  ? "No personalized resume matches found for this filter"
+                  : `No active drives found for ${selectedLocation}`}
+              </h3>
               <p className="text-xs text-slate-500 max-w-md mx-auto">
-                No hiring opportunities have been ingested for {selectedLocation} yet. Click below to scrape and ingest live campus openings in this tech hub!
+                {matchMode === "based_on_resume"
+                  ? hasResume
+                    ? "Try updating your resume with additional technical skills/projects, switching to 'Both (Default)' or 'All Jobs', or fetching more openings."
+                    : "Upload your PDF resume above to discover personalized matches, or switch to 'All Jobs'."
+                  : `No hiring opportunities have been ingested for ${selectedLocation} yet. Click below to scrape and ingest live campus openings in this tech hub!`}
               </p>
-              <button
-                onClick={() => handleFetchLatestDrives(selectedLocation)}
-                disabled={fetchingDrives}
-                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-md transition cursor-pointer"
-              >
-                ⚡ Fetch Latest Openings for {selectedLocation} Now
-              </button>
+              <div className="flex items-center justify-center gap-2 flex-wrap">
+                {matchMode === "based_on_resume" && (
+                  <button
+                    type="button"
+                    onClick={() => handleChangeMatchMode("all")}
+                    className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
+                  >
+                    Switch to All Jobs
+                  </button>
+                )}
+                <button
+                  onClick={() => handleFetchLatestDrives(selectedLocation)}
+                  disabled={fetchingDrives}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-md transition cursor-pointer"
+                >
+                  ⚡ Fetch Latest Openings for {selectedLocation} Now
+                </button>
+              </div>
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {drives.filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id))).map((d: any) => {
-              const isUnseenNew = d.is_new && !seenDriveIds.includes(d.id);
-              return (
-              <div
-                key={d.id}
-                className={`bg-white rounded-2xl p-6 border transition-all flex flex-col justify-between space-y-4 relative overflow-hidden ${
-                  d.has_applied ? "border-emerald-300 shadow-sm" : "border-slate-200 hover:border-indigo-300 shadow-sm"
-                }`}
-              >
-                {d.has_applied && (
-                  <div className="absolute top-0 right-0 bg-emerald-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl flex items-center gap-1 shadow-sm">
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>APPLIED {d.match_score ? `• ${d.match_score}% MATCH` : ""}</span>
-                  </div>
-                )}
-
+          {matchMode === "both" ? (
+            <div className="space-y-8">
+              {/* Section 1: Personalized Matches */}
+              {hasResume && (
                 <div className="space-y-3">
-                  <div className="flex items-start justify-between gap-2 pt-0.5">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
-                        {d.salary_package}
+                  <div className="flex items-center justify-between border-b border-violet-100 pb-2">
+                    <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-violet-600" />
+                      <span>Personalized Matches for Your Resume</span>
+                      <span className="text-xs px-2.5 py-0.5 rounded-full bg-violet-100 text-violet-800 font-bold">
+                        {personalizedDrives.filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id))).length}
                       </span>
-                      {d.eligibility && (
-                        <span
-                          className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                            d.eligibility.is_eligible
-                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                              : "bg-rose-50 text-rose-700 border-rose-200"
-                          }`}
-                          title={d.eligibility.reasons?.join(" | ") || "Meets all drive eligibility rules"}
-                        >
-                          {d.eligibility.is_eligible ? (
-                            <>
-                              <CheckCircle2 className="w-2.5 h-2.5" />
-                              <span>Eligible</span>
-                            </>
-                          ) : (
-                            <>
-                              <XCircle className="w-2.5 h-2.5" />
-                              <span>Not Eligible</span>
-                            </>
-                          )}
-                        </span>
-                      )}
-                      {d.eligibility?.package_goal_match !== null && d.eligibility?.package_goal_match !== undefined && (
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                            d.eligibility.package_goal_match
-                              ? "bg-violet-50 text-violet-700 border-violet-200"
-                              : "bg-amber-50 text-amber-800 border-amber-200"
-                          }`}
-                        >
-                          {d.eligibility.package_goal_match ? "★ Goal CTC" : "Below Goal CTC"}
-                        </span>
-                      )}
-                      {isUnseenNew && (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wide bg-gradient-to-r from-amber-500 to-orange-500 text-white px-2 py-0.5 rounded-full shadow-2xs animate-pulse">
-                          <Sparkles className="w-2.5 h-2.5" />
-                          <span>NEW</span>
-                        </span>
-                      )}
+                    </h3>
+                    <span className="text-[11px] text-slate-500 font-medium">Ranked highest to lowest relevance (≥30%)</span>
+                  </div>
+                  {personalizedDrives.length === 0 ? (
+                    <div className="bg-violet-50/40 rounded-2xl p-6 border border-dashed border-violet-200 text-center text-xs text-slate-600">
+                      No drives reached the 30% skill/experience threshold for this hub yet. All active opportunities are listed below.
                     </div>
-                    <span className="text-xs font-medium text-slate-500 flex items-center gap-1">
-                      <Clock className="w-3 h-3 text-slate-400" />
-                      {d.days_remaining !== undefined ? `Drive in ${d.days_remaining}d` : "Upcoming"}
-                    </span>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="font-bold text-lg text-slate-900">{d.company_name}</h3>
-                      {d.posted_time_ago && (
-                        <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-                          {d.posted_time_ago}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs font-semibold text-indigo-600">{d.role_title}</p>
-                    <p className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
-                      <MapPin className="w-3 h-3 text-slate-400" />
-                      <span>{d.location || "Pan India / Hybrid"}</span>
-                    </p>
-                  </div>
-
-                  <p className="text-xs text-slate-600 line-clamp-3 leading-relaxed">
-                    {formatJobDescription(d.job_description)}
-                  </p>
-
-                  {/* External Links & Portals */}
-                  <div className="flex items-center gap-2 flex-wrap pt-1">
-                    {d.application_url && (
-                      <a
-                        href={d.application_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-lg transition ${
-                          d.form_type === "DIRECT_FORM"
-                            ? "text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200"
-                            : "text-violet-700 hover:text-violet-900 bg-violet-50 hover:bg-violet-100 border border-violet-100"
-                        }`}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <ExternalLink className={`w-3 h-3 ${d.form_type === "DIRECT_FORM" ? "text-emerald-600" : "text-violet-600"}`} />
-                        <span>{d.form_type === "DIRECT_FORM" ? "Direct Form ↗" : "Corporate Portal ↗"}</span>
-                      </a>
-                    )}
-                    {d.company_website && (
-                      <a
-                        href={d.company_website}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-lg transition"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Globe className="w-3 h-3 text-slate-500" />
-                        <span>Website ↗</span>
-                      </a>
-                    )}
-                  </div>
-
-                  {d.selection_rounds && (
-                    <div className="text-[10px] text-slate-500 bg-slate-50 p-2 rounded-lg border border-slate-100">
-                      <span className="font-semibold text-slate-700">Rounds: </span>
-                      <span>{d.selection_rounds}</span>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      {personalizedDrives
+                        .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
+                        .map((d: any) => renderDriveCard(d))}
                     </div>
                   )}
                 </div>
+              )}
 
-                <div className="space-y-3 pt-3 border-t border-slate-100">
-                  <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span>Min CGPA: <strong className="text-slate-800">{d.min_cgpa}</strong></span>
-                    <span>Max Arrears: <strong className="text-slate-800">{d.max_arrears}</strong></span>
+              {/* Section 2: All Other Available Jobs */}
+              {otherDrives.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+                      <Globe className="w-4 h-4 text-indigo-600" />
+                      <span>{hasResume ? "All Other Available Jobs" : "All Available Jobs"}</span>
+                      <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-bold">
+                        {otherDrives.filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id))).length}
+                      </span>
+                    </h3>
                   </div>
-                  {d.eligibility && !d.eligibility.is_eligible && d.eligibility.reasons?.length > 0 && (
-                    <div className="text-[11px] font-medium text-rose-700 bg-rose-50/80 border border-rose-200/70 rounded-lg px-2.5 py-1.5">
-                      {d.eligibility.reasons[0]}
-                      {d.eligibility.reasons.length > 1 ? ` (+${d.eligibility.reasons.length - 1} more)` : ""}
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-2">
-                    {d.has_applied ? (
-                      <button
-                        onClick={() => openDriveModal(d, "details")}
-                        className="flex-1 py-2 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold text-xs border border-emerald-200 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>✓ Applied</span>
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => openDriveModal(d, "apply")}
-                        className="flex-1 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm shadow-indigo-200"
-                      >
-                        Apply Now
-                      </button>
-                    )}
-
-                    <button
-                      onClick={() => openDriveModal(d, "details")}
-                      className="py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
-                      title="View company details and eligibility"
-                    >
-                      Details
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setCompanyName(d.company_name);
-                        setRoleTitle(d.role_title);
-                        setTab("prep_hub");
-                      }}
-                      className="py-2 px-2.5 rounded-xl bg-violet-50 hover:bg-violet-100 text-violet-700 font-semibold text-xs flex items-center gap-1 transition-colors cursor-pointer"
-                      title="Prepare for this company with Placement Hub"
-                    >
-                      <BrainCircuit className="w-3.5 h-3.5 text-violet-600" />
-                      <span>Prep</span>
-                    </button>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {otherDrives
+                      .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
+                      .map((d: any) => renderDriveCard(d))}
                   </div>
                 </div>
-              </div>
-              );
-            })}
-          </div>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {drives
+                .filter((d: any) => !filterNewOnly || (d.is_new && !seenDriveIds.includes(d.id)))
+                .map((d: any) => renderDriveCard(d))}
+            </div>
+          )}
         </div>
       )}
 
@@ -2572,6 +2747,67 @@ ${note}
                       </div>
                     )}
                   </div>
+
+                  {/* Separate Resume Skill & Experience Match Card */}
+                  {selectedDriveForModal.resume_match && (
+                    <div className="p-4 rounded-2xl bg-violet-50/50 border border-violet-200 space-y-3">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h4 className="text-xs font-bold text-violet-950 uppercase tracking-wider flex items-center gap-1.5">
+                          <Sparkles className="w-4 h-4 text-violet-600" />
+                          <span>Resume Skill &amp; Experience Relevance</span>
+                        </h4>
+                        <span className="text-xs font-extrabold px-2.5 py-0.5 rounded-full bg-white text-violet-800 border border-violet-200">
+                          {Math.round(selectedDriveForModal.resume_match.match_percentage)}% • {selectedDriveForModal.resume_match.verdict}
+                        </span>
+                      </div>
+
+                      {selectedDriveForModal.resume_match.reasons?.length > 0 && (
+                        <ul className="space-y-1 text-xs text-slate-700 list-disc list-inside">
+                          {selectedDriveForModal.resume_match.reasons.map((rs: string, rIdx: number) => (
+                            <li key={rIdx} className="font-medium">{rs}</li>
+                          ))}
+                        </ul>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        {selectedDriveForModal.resume_match.matched_skills?.length > 0 && (
+                          <div className="p-2.5 rounded-xl bg-white border border-emerald-200/80 space-y-1.5">
+                            <span className="text-[11px] font-bold text-emerald-800 block">Matched Skills</span>
+                            <div className="flex flex-wrap gap-1">
+                              {selectedDriveForModal.resume_match.matched_skills.map((ms: string, i: number) => (
+                                <span key={i} className="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  ✓ {ms}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {selectedDriveForModal.resume_match.missing_skills?.length > 0 && (
+                          <div className="p-2.5 rounded-xl bg-white border border-amber-200/80 space-y-1.5">
+                            <span className="text-[11px] font-bold text-amber-800 block">Skills to Highlight / Prepare</span>
+                            <div className="flex flex-wrap gap-1">
+                              {selectedDriveForModal.resume_match.missing_skills.map((ms: string, i: number) => (
+                                <span key={i} className="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                                  {ms}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {selectedDriveForModal.resume_match.matched_experience?.length > 0 && (
+                        <div className="space-y-1 text-[11px] text-slate-600">
+                          <span className="font-bold text-slate-700 block">Matched Internships, Projects &amp; Certifications:</span>
+                          {selectedDriveForModal.resume_match.matched_experience.map((exp: string, i: number) => (
+                            <p key={i} className="bg-white px-2.5 py-1.5 rounded-lg border border-violet-100 font-medium">
+                              • {exp}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Selection Process / Rounds */}
                   {selectedDriveForModal.selection_rounds && (

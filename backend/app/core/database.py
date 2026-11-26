@@ -66,6 +66,18 @@ def init_db():
                     conn.execute(text("ALTER TABLE student_profiles ADD COLUMN target_companies VARCHAR"))
                 if "target_min_ctc" not in sp_cols:
                     conn.execute(text("ALTER TABLE student_profiles ADD COLUMN target_min_ctc FLOAT"))
+
+                # Auto-migrate resumes structured section columns
+                res_result = conn.execute(text("PRAGMA table_info(resumes)")).fetchall()
+                res_cols = [r[1] for r in res_result]
+                if "parsed_internships" not in res_cols:
+                    conn.execute(text("ALTER TABLE resumes ADD COLUMN parsed_internships TEXT DEFAULT '[]'"))
+                if "parsed_projects" not in res_cols:
+                    conn.execute(text("ALTER TABLE resumes ADD COLUMN parsed_projects TEXT DEFAULT '[]'"))
+                if "parsed_certifications" not in res_cols:
+                    conn.execute(text("ALTER TABLE resumes ADD COLUMN parsed_certifications TEXT DEFAULT '[]'"))
+                if "parsed_achievements" not in res_cols:
+                    conn.execute(text("ALTER TABLE resumes ADD COLUMN parsed_achievements TEXT DEFAULT '[]'"))
                 
                 # Performance indexes for high-throughput filtering and sorting
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_placement_drives_drive_date ON placement_drives (drive_date)"))

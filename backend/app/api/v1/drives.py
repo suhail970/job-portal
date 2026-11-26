@@ -9,6 +9,7 @@ from app.models.entities import PlacementDrive, Application, StudentProfile, Res
 from app.models.enums import UserRole, DriveStatus, ApplicationStatus
 from app.ai.agents.gap_leaf import match_resume_to_drive
 from app.services.eligibility_engine import evaluate_drive_eligibility
+from app.services.resume_matcher import prepare_resume_profile, compute_resume_job_match, DEFAULT_MATCH_THRESHOLD
 from app.workers.telegram_worker import telegram_worker
 from app.workers.cron_scheduler import cron_scheduler
 import json
@@ -40,15 +41,15 @@ class StudentApplyRequest(BaseModel):
     github_url: Optional[str] = None
     linkedin_url: Optional[str] = None
 
-@router.get("", response_model=List[dict])
-def list_drives(
-    location: Optional[str] = Query(default=None, description="Filter by location (e.g. Kolkata, Chennai, Bangalore)"),
+def _enrich_drives_for_user(
+    session: Session,
+    current_user: User,
+    location: Optional[str] = None,
     status_filter: Optional[DriveStatus] = None,
-    current_user: User = Depends(get_current_user),
-    session: Session = Depends(get_session)
+    include_resume_match: bool = True,
 ):
     query = select(PlacementDrive)
-    
+
     # Multi-tenant isolation: TPO & Students see drives from their college as well as verified campus drives/public drives
     if current_user.college_id:
         query = query.where(
@@ -56,21 +57,21 @@ def list_drives(
             (PlacementDrive.college_id == "col-anna-001") |
             (PlacementDrive.college_id.is_(None))
         )
-        
+
     if status_filter:
         query = query.where(PlacementDrive.status == status_filter)
 
     if location and location.strip() and location.strip().lower() != "all":
         loc_term = f"%{location.strip().lower()}%"
         query = query.where(func.lower(PlacementDrive.location).like(loc_term))
-        
-    query = query.order_by(PlacementDrive.drive_date.asc())
-    drives = session.exec(query).all()
 
-    # Track applications & eligibility for current student user
+    drives = session.exec(query.order_by(PlacementDrive.drive_date.asc())).all()
+
     applied_map = {}
     student = session.exec(select(StudentProfile).where(StudentProfile.user_id == current_user.id)).first()
     student_dept_code = None
+    prepared_resume = None
+
     if student:
         student_dept_code, _ = get_department_details(session, student.department_id)
         apps = session.exec(select(Application).where(Application.student_id == student.id)).all()
@@ -81,8 +82,16 @@ def list_drives(
                 "status": a.status.value,
                 "match_score": a.match_score,
                 "applied_at": a.applied_at.isoformat() if a.applied_at else None,
-                "notes": a.notes
+                "notes": a.notes,
             }
+
+    if include_resume_match:
+        student_id = student.id if student else current_user.id
+        latest_resume = session.exec(
+            select(Resume).where(Resume.student_id == student_id).order_by(Resume.uploaded_at.desc())
+        ).first()
+        if latest_resume:
+            prepared_resume = prepare_resume_profile(latest_resume)
 
     now = datetime.now(timezone.utc)
     results = []
@@ -92,7 +101,7 @@ def list_drives(
         time_rem = (drive_dt - now).total_seconds()
         d_dict["days_remaining"] = max(0, int(time_rem / 86400))
         d_dict["hours_remaining"] = max(0, int(time_rem / 3600))
-        
+
         # Dynamic Freshness Detection (48 hours window)
         if d.created_at:
             created_dt = d.created_at if d.created_at.tzinfo else d.created_at.replace(tzinfo=timezone.utc)
@@ -107,7 +116,7 @@ def list_drives(
         else:
             d_dict["is_new"] = False
             d_dict["posted_time_ago"] = None
-        
+
         app_info = applied_map.get(d.id, {})
         d_dict["has_applied"] = app_info.get("has_applied", False)
         d_dict["application_status"] = app_info.get("status", None)
@@ -116,9 +125,124 @@ def list_drives(
         d_dict["applied_at"] = app_info.get("applied_at", None)
         if student:
             d_dict["eligibility"] = evaluate_drive_eligibility(student, student_dept_code, d)
+        if prepared_resume:
+            d_dict["resume_match"] = compute_resume_job_match(prepared_resume, d, min_threshold=DEFAULT_MATCH_THRESHOLD)
         results.append(d_dict)
 
+    return results, prepared_resume
+
+
+@router.get("", response_model=List[dict])
+def list_drives(
+    location: Optional[str] = Query(default=None, description="Filter by location (e.g. Kolkata, Chennai, Bangalore)"),
+    status_filter: Optional[DriveStatus] = None,
+    match_mode: str = Query(default="both", pattern="^(based_on_resume|all|both)$"),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    results, prepared_resume = _enrich_drives_for_user(
+        session=session,
+        current_user=current_user,
+        location=location,
+        status_filter=status_filter,
+        include_resume_match=(match_mode != "all"),
+    )
+    if match_mode == "based_on_resume" and prepared_resume is not None:
+        matched_only = [r for r in results if (r.get("resume_match") or {}).get("is_recommended")]
+        matched_only.sort(key=lambda x: (x.get("resume_match") or {}).get("match_percentage", 0.0), reverse=True)
+        return matched_only
     return results
+
+
+@router.get("/matched")
+def list_matched_drives(
+    location: Optional[str] = Query(default=None, description="Filter by location (e.g. Kolkata, Chennai, Bangalore)"),
+    status_filter: Optional[DriveStatus] = None,
+    match_mode: str = Query(default="both", pattern="^(based_on_resume|all|both)$"),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """
+    Structured drive discovery supporting three fetching modes:
+    - 'based_on_resume': Personalized matches only (sorted by relevance)
+    - 'all': All available jobs without resume-based filtering
+    - 'both': Default - Separated Personalized Matches & All Other Available Jobs
+    """
+    results, prepared_resume = _enrich_drives_for_user(
+        session=session,
+        current_user=current_user,
+        location=location,
+        status_filter=status_filter,
+        include_resume_match=(match_mode != "all"),
+    )
+
+    has_resume = prepared_resume is not None
+    resume_summary = (
+        {
+            "resume_id": prepared_resume.resume_id,
+            "filename": prepared_resume.filename,
+            "skills": prepared_resume.skills,
+            "internships_count": len(prepared_resume.internships),
+            "projects_count": len(prepared_resume.projects),
+            "certifications_count": len(prepared_resume.certifications),
+            "achievements_count": len(prepared_resume.achievements),
+        }
+        if prepared_resume
+        else None
+    )
+
+    if match_mode == "all":
+        return {
+            "match_mode": "all",
+            "has_resume": has_resume,
+            "resume_summary": resume_summary,
+            "min_threshold": DEFAULT_MATCH_THRESHOLD,
+            "personalized_matches": [],
+            "other_jobs": [],
+            "all_jobs": results,
+            "counts": {
+                "personalized": 0,
+                "others": 0,
+                "total": len(results),
+            },
+        }
+
+    if not has_resume:
+        others = results if match_mode == "both" else []
+        return {
+            "match_mode": match_mode,
+            "has_resume": False,
+            "resume_summary": None,
+            "min_threshold": DEFAULT_MATCH_THRESHOLD,
+            "personalized_matches": [],
+            "other_jobs": others,
+            "all_jobs": [],
+            "counts": {
+                "personalized": 0,
+                "others": len(others),
+                "total": len(others),
+            },
+        }
+
+    personalized = [r for r in results if (r.get("resume_match") or {}).get("is_recommended")]
+    personalized.sort(key=lambda x: (x.get("resume_match") or {}).get("match_percentage", 0.0), reverse=True)
+
+    others = [] if match_mode == "based_on_resume" else [r for r in results if not (r.get("resume_match") or {}).get("is_recommended")]
+
+    return {
+        "match_mode": match_mode,
+        "has_resume": True,
+        "resume_summary": resume_summary,
+        "min_threshold": DEFAULT_MATCH_THRESHOLD,
+        "personalized_matches": personalized,
+        "other_jobs": others,
+        "all_jobs": [],
+        "counts": {
+            "personalized": len(personalized),
+            "others": len(others),
+            "total": len(personalized) + len(others),
+        },
+    }
 
 @router.get("/sync-status")
 def get_drive_sync_status(
